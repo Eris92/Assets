@@ -3,16 +3,26 @@ const $ = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', ...(options.method ? { 'X-CSRF-TOKEN': me.csrf } : {}), ...options.headers } });
-  if (!response.ok) { let detail; try { detail = (await response.json()).detail; } catch {} throw new Error(detail || `HTTP ${response.status}`); }
+  if (!response.ok) { let detail; try { const data = await response.json(); detail = data.detail || data.error; } catch {} throw new Error(detail || `HTTP ${response.status}`); }
   return response.status === 204 ? null : response.json();
 }
 function message(text, error = false) { $('message').textContent = text; $('message').className = error ? 'error' : ''; }
 function view(name) {
-  for (const item of ['assets','reports','admin']) $(item+'View').hidden = item !== name;
+  if ((name === 'admin' || name === 'settings') && !me?.admin) return;
+  for (const item of ['assets','reports','admin','settings']) $(item+'View').hidden = item !== name;
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === name));
-  $('title').textContent = ({assets:'Moje zasoby',reports:'Moje zgłoszenia',admin:'Administracja'})[name];
-  $('subtitle').textContent = ({assets:'Sprawdź przypisane elementy i zgłoś niezgodność w danych.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.'})[name];
-  message(''); if (name === 'reports' || name === 'admin') loadReports();
+  $('title').textContent = ({assets:'Moje zasoby',reports:'Moje zgłoszenia',admin:'Administracja',settings:'Ustawienia'})[name];
+  $('subtitle').textContent = ({assets:'Sprawdź przypisane elementy i zgłoś niezgodność w danych.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.',settings:'Połączenie Jira, uprawnienia administratorów i zakres korekt.'})[name];
+  message(''); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'settings') loadSettings();
+}
+async function loadSettings() {
+  try {
+    const settings = await api('/api/admin/settings');
+    for (const id of ['siteUrl','accountEmail','cloudId','workspaceId','aql','ownerAttributeId','adminGroup']) $(id).value = settings[id] || '';
+    $('allowedIds').value = settings.allowedCorrectionAttributeIds.join(', ');
+    $('apiToken').value = '';
+    $('tokenStatus').textContent = settings.tokenConfigured ? 'Token zapisany. Pozostaw puste, aby go zachować.' : 'Token nie jest zapisany.';
+  } catch(e) { message(e.message, true); }
 }
 async function loadAssets() {
   $('assets').innerHTML = '<p class="empty">Pobieranie zasobów…</p>';
@@ -52,4 +62,38 @@ $('adminReports').addEventListener('click', async e => {
   b.disabled = true; try { await api(`/api/reports/${b.dataset.id}/decision`,{method:'POST',body:JSON.stringify({action})}); await loadReports(); message('Decyzja została zapisana.'); } catch(err) { message(err.message,true); b.disabled = false; }
 });
 $('refresh').onclick = loadAssets; $('refreshAdmin').onclick = loadReports;
-(async () => { try { me = await api('/api/me'); $('identity').textContent = me.name; $('adminNav').hidden = !me.admin; await loadAssets(); } catch(e) { $('assets').innerHTML = '<p class="empty">Brak dostępu. Sprawdź Windows Authentication w IIS.</p>'; } })();
+$('settingsForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const data = Object.fromEntries(['siteUrl','accountEmail','cloudId','workspaceId','aql','ownerAttributeId','adminGroup'].map(id => [id,$(id).value.trim()]));
+  data.allowedCorrectionAttributeIds = $('allowedIds').value.split(',').map(x => x.trim()).filter(Boolean);
+  data.apiToken = $('apiToken').value;
+  try {
+    await api('/api/admin/settings',{method:'POST',body:JSON.stringify(data)});
+    me = await api('/api/me'); $('apiToken').value = ''; $('tokenStatus').textContent = 'Token zapisany. Pozostaw puste, aby go zachować.';
+    message('Ustawienia zapisane.');
+  } catch(err) { message(err.message,true); }
+});
+$('discoverWorkspace').onclick = async () => {
+  try {
+    const data = await api('/api/admin/jira/workspaces');
+    const values = Array.isArray(data) ? data : data.values || data.workspaces || [];
+    const ids = values.map(x => x.workspaceId || x.id).filter(Boolean);
+    if (ids.length === 1) { $('workspaceId').value = ids[0]; message('Wykryto workspace. Zapisz ustawienia.'); }
+    else message(ids.length ? `Dostępne workspace ID: ${ids.join(', ')}` : 'Jira nie zwróciła workspace ID.', !ids.length);
+  } catch(err) { message(err.message,true); }
+};
+(async () => {
+  try {
+    me = await api('/api/me');
+    $('identity').textContent = me.name || 'Nieznane konto';
+    $('identityRole').textContent = me.admin ? 'Administrator' : 'Użytkownik';
+    $('accountBadge').textContent = `${me.name} · ${me.admin ? 'Administrator' : 'Użytkownik'}`;
+    $('adminNav').hidden = $('settingsNav').hidden = !me.admin;
+    await loadAssets();
+  } catch(e) {
+    $('identity').textContent = 'Brak tożsamości Windows';
+    $('identityRole').textContent = 'Nie uwierzytelniono';
+    $('accountBadge').textContent = 'Nie zalogowano';
+    $('assets').innerHTML = `<p class="empty">Aplikacja nie otrzymała tożsamości Windows (API: ${escapeHtml(e.message)}). W IIS dla tej aplikacji włącz Windows Authentication i wyłącz Anonymous Authentication, następnie odśwież stronę.</p>`;
+  }
+})();

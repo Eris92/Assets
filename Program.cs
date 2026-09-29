@@ -1,13 +1,23 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
+using System.Security.Principal;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Server.IISIntegration;
 using Microsoft.Data.Sqlite;
 
 var builder = WebApplication.CreateBuilder(args);
+var dbPath = builder.Configuration["Portal:DatabasePath"] ?? throw new InvalidOperationException("DatabasePath missing");
+var dataDirectory = Path.GetDirectoryName(dbPath) ?? throw new InvalidOperationException("Invalid DatabasePath");
+Directory.CreateDirectory(dataDirectory);
+var keyDirectory = Path.Combine(dataDirectory, "keys");
+Directory.CreateDirectory(keyDirectory);
+builder.Services.AddDataProtection().SetApplicationName("AssetsPortal")
+    .PersistKeysToFileSystem(new DirectoryInfo(keyDirectory)).ProtectKeysWithDpapi();
 builder.Services.AddAuthentication(IISDefaults.AuthenticationScheme);
 builder.Services.AddAuthorization();
 builder.Services.AddAntiforgery(o => o.HeaderName = "X-CSRF-TOKEN");
@@ -19,8 +29,6 @@ app.UseAuthorization();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
-var dbPath = app.Configuration["Portal:DatabasePath"] ?? throw new InvalidOperationException("DatabasePath missing");
-Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
 string ConnectionString() => new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadWriteCreate }.ToString();
 using (var db = new SqliteConnection(ConnectionString())) {
     db.Open();
@@ -33,24 +41,60 @@ using (var db = new SqliteConnection(ConnectionString())) {
           Reason TEXT NOT NULL, Reporter TEXT NOT NULL, CreatedAt TEXT NOT NULL,
           Status TEXT NOT NULL, DecidedBy TEXT, DecidedAt TEXT, Error TEXT
         );
+        CREATE TABLE IF NOT EXISTS Settings (Key TEXT PRIMARY KEY, Value TEXT NOT NULL);
         """;
     cmd.ExecuteNonQuery();
 }
 
-bool IsAdmin(ClaimsPrincipal user) => user.Identity?.IsAuthenticated == true &&
-    user.IsInRole(app.Configuration["Portal:AdminGroup"] ?? "__not_configured__");
+string? Setting(string key, string fallback) {
+    using var db = new SqliteConnection(ConnectionString()); db.Open();
+    using var cmd = db.CreateCommand();
+    cmd.CommandText = "SELECT Value FROM Settings WHERE Key=$key";
+    cmd.Parameters.AddWithValue("$key", key);
+    return cmd.ExecuteScalar() as string ?? app.Configuration[fallback];
+}
+string[] AllowedAttributes() {
+    var stored = Setting("AllowedCorrectionAttributeIds", "Jira:AllowedCorrectionAttributeIds");
+    if (stored is null) return app.Configuration.GetSection("Jira:AllowedCorrectionAttributeIds").Get<string[]>() ?? [];
+    return stored.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+}
+bool IsAdmin(ClaimsPrincipal user) {
+    if (user.Identity is not WindowsIdentity identity || !identity.IsAuthenticated) return false;
+    var group = Setting("AdminGroup", "Portal:AdminGroup");
+    if (string.IsNullOrWhiteSpace(group)) return false;
+    try {
+        var sid = group.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)
+            ? new SecurityIdentifier(group)
+            : (SecurityIdentifier)new NTAccount(group).Translate(typeof(SecurityIdentifier));
+        return new WindowsPrincipal(identity).IsInRole(sid);
+    } catch (Exception ex) when (ex is IdentityNotMappedException or ArgumentException) {
+        app.Logger.LogWarning("Configured admin group could not be resolved"); return false;
+    }
+}
 IResult AuthError(HttpContext ctx) => ctx.User.Identity?.IsAuthenticated == true ? Results.Forbid() : Results.Unauthorized();
 bool IsValidText(string? s, int max) => !string.IsNullOrWhiteSpace(s) && s.Length <= max;
 string? JiraBase() {
-    var raw = app.Configuration["Jira:BaseUrl"];
-    return Uri.TryCreate(raw, UriKind.Absolute, out var u) && u.Scheme == "https" && !raw!.Contains("CLOUD_ID") ? raw.TrimEnd('/') + "/" : null;
+    var cloudId = Setting("CloudId", "Jira:CloudId");
+    var workspaceId = Setting("WorkspaceId", "Jira:WorkspaceId");
+    if (!Guid.TryParse(cloudId, out _) || !Guid.TryParse(workspaceId, out _)) return null;
+    return $"https://api.atlassian.com/ex/jira/{cloudId}/jsm/assets/workspace/{workspaceId}/v1/";
+}
+string? JiraToken() {
+    var encrypted = Setting("ApiToken", "Jira:EncryptedToken");
+    if (!string.IsNullOrWhiteSpace(encrypted)) return app.Services.GetRequiredService<IDataProtectionProvider>()
+        .CreateProtector("JiraApiToken.v1").Unprotect(encrypted);
+    return app.Configuration["Jira:Token"];
+}
+AuthenticationHeaderValue JiraAuthorization() {
+    var email = Setting("AccountEmail", "Jira:AccountEmail");
+    var token = JiraToken();
+    if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(token)) throw new InvalidOperationException("Jira credentials are not configured");
+    return new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{email}:{token}")));
 }
 async Task<JsonNode> Jira(HttpMethod method, string path, object? body = null) {
     var baseUrl = JiraBase() ?? throw new InvalidOperationException("Jira BaseUrl is not configured");
-    var token = app.Configuration["Jira:Token"];
-    if (string.IsNullOrWhiteSpace(token)) throw new InvalidOperationException("Jira Token is not configured");
     using var request = new HttpRequestMessage(method, new Uri(new Uri(baseUrl), path));
-    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+    request.Headers.Authorization = JiraAuthorization();
     request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     if (body is not null) request.Content = JsonContent.Create(body);
     using var client = app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("jira");
@@ -74,16 +118,85 @@ object ProjectObject(JsonNode obj) => new {
 app.MapGet("/api/me", (HttpContext ctx, IAntiforgery anti) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     var tokens = anti.GetAndStoreTokens(ctx);
-    return Results.Ok(new { name = ctx.User.Identity.Name, admin = IsAdmin(ctx.User), csrf = tokens.RequestToken,
-        allowedAttributes = app.Configuration.GetSection("Jira:AllowedCorrectionAttributeIds").Get<string[]>() ?? [] });
+    return Results.Ok(new { name = ctx.User.Identity.Name, authenticationType = ctx.User.Identity.AuthenticationType,
+        admin = IsAdmin(ctx.User), adminGroup = Setting("AdminGroup", "Portal:AdminGroup"), csrf = tokens.RequestToken,
+        allowedAttributes = AllowedAttributes() });
+});
+
+app.MapGet("/api/admin/settings", (HttpContext ctx) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    return Results.Ok(new {
+        siteUrl = Setting("SiteUrl", "Jira:SiteUrl"), accountEmail = Setting("AccountEmail", "Jira:AccountEmail"),
+        cloudId = Setting("CloudId", "Jira:CloudId"), workspaceId = Setting("WorkspaceId", "Jira:WorkspaceId"),
+        aql = Setting("Aql", "Jira:Aql"), ownerAttributeId = Setting("OwnerAttributeId", "Jira:OwnerAttributeId"),
+        allowedCorrectionAttributeIds = AllowedAttributes(), adminGroup = Setting("AdminGroup", "Portal:AdminGroup"),
+        tokenConfigured = !string.IsNullOrWhiteSpace(JiraToken())
+    });
+});
+
+app.MapPost("/api/admin/settings", async (HttpContext ctx, IAntiforgery anti, SettingsInput input) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    if (!Uri.TryCreate(input.SiteUrl, UriKind.Absolute, out var site) || site.Scheme != "https" ||
+        !site.Host.EndsWith(".atlassian.net", StringComparison.OrdinalIgnoreCase) || site.AbsolutePath != "/" ||
+        !IsValidText(input.AccountEmail, 254) || !Guid.TryParse(input.CloudId, out _) ||
+        (!string.IsNullOrWhiteSpace(input.WorkspaceId) && !Guid.TryParse(input.WorkspaceId, out _)) ||
+        !IsValidText(input.Aql, 2000) || !IsValidText(input.OwnerAttributeId, 32) ||
+        !long.TryParse(input.OwnerAttributeId, out _) || !IsValidText(input.AdminGroup, 256) ||
+        input.AllowedCorrectionAttributeIds is null || input.AllowedCorrectionAttributeIds.Length > 50 ||
+        input.AllowedCorrectionAttributeIds.Any(id => !long.TryParse(id, out _)) ||
+        input.ApiToken?.Length > 1000) return Results.BadRequest(new { error = "Invalid settings" });
+    try {
+        var group = input.AdminGroup.Trim();
+        var sid = group.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase) ? new SecurityIdentifier(group)
+            : (SecurityIdentifier)new NTAccount(group).Translate(typeof(SecurityIdentifier));
+        if (!new WindowsPrincipal((WindowsIdentity)ctx.User.Identity!).IsInRole(sid))
+            return Results.BadRequest(new { error = "You must belong to the configured admin group" });
+        using var db = new SqliteConnection(ConnectionString()); db.Open();
+        using var transaction = db.BeginTransaction();
+        void Save(string key, string value) {
+            using var cmd = db.CreateCommand(); cmd.Transaction = transaction;
+            cmd.CommandText = "INSERT INTO Settings(Key,Value) VALUES($key,$value) ON CONFLICT(Key) DO UPDATE SET Value=excluded.Value";
+            cmd.Parameters.AddWithValue("$key", key); cmd.Parameters.AddWithValue("$value", value); cmd.ExecuteNonQuery();
+        }
+        Save("SiteUrl", site.GetLeftPart(UriPartial.Authority));
+        Save("AccountEmail", input.AccountEmail.Trim());
+        Save("CloudId", input.CloudId.Trim());
+        Save("WorkspaceId", input.WorkspaceId?.Trim() ?? "");
+        Save("Aql", input.Aql.Trim());
+        Save("OwnerAttributeId", input.OwnerAttributeId.Trim());
+        Save("AllowedCorrectionAttributeIds", string.Join(',', input.AllowedCorrectionAttributeIds.Distinct()));
+        Save("AdminGroup", group);
+        if (!string.IsNullOrWhiteSpace(input.ApiToken)) Save("ApiToken", app.Services.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("JiraApiToken.v1").Protect(input.ApiToken.Trim()));
+        transaction.Commit();
+        app.Logger.LogInformation("Settings updated by {User}", ctx.User.Identity.Name);
+        return Results.Ok();
+    } catch (Exception ex) when (ex is IdentityNotMappedException or ArgumentException) {
+        return Results.BadRequest(new { error = "Admin group could not be resolved" });
+    }
+});
+
+app.MapGet("/api/admin/jira/workspaces", async (HttpContext ctx) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    var siteUrl = Setting("SiteUrl", "Jira:SiteUrl");
+    if (string.IsNullOrWhiteSpace(siteUrl)) return Results.Problem("Configure Jira site URL", statusCode: 503);
+    try {
+        using var request = new HttpRequestMessage(HttpMethod.Get, siteUrl.TrimEnd('/') + "/rest/servicedeskapi/assets/workspace");
+        request.Headers.Authorization = JiraAuthorization();
+        using var client = app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("jira");
+        using var response = await client.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+        return Results.Content(await response.Content.ReadAsStringAsync(), "application/json");
+    } catch (Exception ex) { app.Logger.LogError(ex, "Workspace discovery failed"); return Results.Problem("Nie udalo sie pobrac workspace Jira.", statusCode: 502); }
 });
 
 app.MapGet("/api/assets", async (HttpContext ctx) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     try {
-        var ownerId = app.Configuration["Jira:OwnerAttributeId"];
+        var ownerId = Setting("OwnerAttributeId", "Jira:OwnerAttributeId");
         if (string.IsNullOrWhiteSpace(ownerId)) return Results.Problem("Configure Jira OwnerAttributeId", statusCode: 503);
-        var result = await Jira(HttpMethod.Post, "object/aql", new { qlQuery = app.Configuration["Jira:Aql"], page = 1, resultsPerPage = 100, includeAttributes = true });
+        var result = await Jira(HttpMethod.Post, "object/aql", new { qlQuery = Setting("Aql", "Jira:Aql"), page = 1, resultsPerPage = 100, includeAttributes = true });
         var entries = result["values"]?.AsArray() ?? result["objectEntries"]?.AsArray() ?? result["results"]?["objectEntries"]?.AsArray() ?? new JsonArray();
         var login = ctx.User.Identity.Name!.Split('\\').Last();
         var mine = entries.Where(o => o is not null && AttributeValue(Attribute(o!, ownerId)).Split(',', StringSplitOptions.TrimEntries).Any(v =>
@@ -97,11 +210,11 @@ app.MapPost("/api/reports", async (HttpContext ctx, IAntiforgery anti, ReportInp
     await anti.ValidateRequestAsync(ctx);
     if (!long.TryParse(input.ObjectId, out var numericId) || numericId <= 0 || !IsValidText(input.AttributeId, 32) ||
         !IsValidText(input.ProposedValue, 500) || !IsValidText(input.Reason, 2000)) return Results.BadRequest();
-    var allowed = app.Configuration.GetSection("Jira:AllowedCorrectionAttributeIds").Get<string[]>() ?? [];
+    var allowed = AllowedAttributes();
     if (!allowed.Contains(input.AttributeId)) return Results.BadRequest(new { error = "Attribute is not permitted for correction" });
     try {
         var obj = await Jira(HttpMethod.Get, $"object/{numericId}");
-        var ownerId = app.Configuration["Jira:OwnerAttributeId"] ?? "";
+        var ownerId = Setting("OwnerAttributeId", "Jira:OwnerAttributeId") ?? "";
         var login = ctx.User.Identity.Name!.Split('\\').Last();
         if (!AttributeValue(Attribute(obj, ownerId)).Split(',', StringSplitOptions.TrimEntries).Any(v =>
             v.Equals(login, StringComparison.OrdinalIgnoreCase) || v.Equals(ctx.User.Identity.Name, StringComparison.OrdinalIgnoreCase))) return Results.Forbid();
@@ -176,3 +289,5 @@ app.Run();
 
 record ReportInput(string ObjectId, string AttributeId, string ProposedValue, string Reason);
 record DecisionInput(string Action);
+record SettingsInput(string SiteUrl, string AccountEmail, string CloudId, string? WorkspaceId, string Aql,
+    string OwnerAttributeId, string[] AllowedCorrectionAttributeIds, string AdminGroup, string? ApiToken);
