@@ -1,8 +1,10 @@
 let me, assets = [], selected;
+const appBase = new URL('.', document.querySelector('script[src$="app.js"]').src);
 const $ = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path, options = {}) {
-  const response = await fetch(path, { credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', ...(options.method ? { 'X-CSRF-TOKEN': me.csrf } : {}), ...options.headers } });
+  const url = new URL(path.replace(/^\/+/, ''), appBase);
+  const response = await fetch(url, { credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', ...(options.method ? { 'X-CSRF-TOKEN': me.csrf } : {}), ...options.headers } });
   if (!response.ok) { let detail; try { const data = await response.json(); detail = data.detail || data.error; } catch {} throw new Error(detail || `HTTP ${response.status}`); }
   return response.status === 204 ? null : response.json();
 }
