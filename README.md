@@ -13,8 +13,17 @@ Pierwsza wersja: przypisane zasoby Jira Assets, zgloszenie korekty, kolejka admi
 
 1. `dotnet publish .\AssetsPortal.csproj -c Release -o C:\Sites\AssetsPortal`
 2. W IIS utworz aplikacje z osobnym app pool (`No Managed Code`), HTTPS i zainstaluj role service **Windows Authentication**. `web.config` wlacza Windows Authentication i wylacza Anonymous Authentication; sprawdz wynik w IIS > aplikacja > Authentication. Jesli IIS blokuje te sekcje, ustaw je na poziomie site w IIS i odblokuj delegowanie konfiguracji lub usun sekcje `<security>` z `web.config`.
-3. Ustaw `Portal:AdminGroup` na serwerze w `appsettings.Production.json` (utworz plik obok aplikacji) na pelna nazwe grupy AD, np. `DOMAIN\\Assets-Portal-Admins`, lub SID. Zachowaj ten plik przy kolejnym publish; nie commituj konfiguracji srodowiskowej. To jest bootstrap administratora; sama grupa nie uwierzytelnia uzytkownika, najpierw IIS musi przekazac Windows identity do `/api/me`. Po pierwszym zapisie w panelu grupa jest rowniez utrwalona w SQLite.
-4. Ustaw ACL na `C:\ProgramData\AssetsPortal` dla tozsamosci app pool (Modify), ogranicz dostep innym kontom. Katalog zawiera SQLite oraz chronione klucze Data Protection. Utrzymuj kopie katalogu wraz z baza i kluczami.
+3. W repo jest tylko wzor `appsettings.org.json`. Przy pierwszym wdrozeniu skopiuj go do `C:\ProgramData\AssetsPortal\appsettings.json` (jesli plik juz istnieje, nie nadpisuj go):
+
+   ```powershell
+   New-Item -ItemType Directory -Path 'C:\ProgramData\AssetsPortal' -Force | Out-Null
+   if (-not (Test-Path 'C:\ProgramData\AssetsPortal\appsettings.json')) {
+       Copy-Item 'C:\Sites\AssetsPortal\appsettings.org.json' 'C:\ProgramData\AssetsPortal\appsettings.json'
+   }
+   ```
+
+   Ustaw tam `Portal:AdminGroup` na pelna nazwe grupy AD, np. `DOMAIN\\Assets-Portal-Admins`, lub SID. To bootstrap administratora; sama grupa nie uwierzytelnia uzytkownika, najpierw IIS musi przekazac Windows identity do `/api/me`. Po pierwszym zapisie w panelu grupa jest rowniez utrwalona w SQLite. Aplikacja nadal odczyta stary `appsettings.json` z katalogu aplikacji, jesli jeszcze nie przeniosles go do ProgramData; konfiguracja z ProgramData ma pierwszenstwo. Kolejny `dotnet publish` nie nadpisze pliku w ProgramData.
+4. Ustaw ACL na `C:\ProgramData\AssetsPortal` dla tozsamosci app pool (Modify) pod SQLite i klucze Data Protection; ogranicz dostep innym kontom. Dla samego `appsettings.json` ustaw aplikacji tylko odczyt, a zapis pozostaw administratorom serwera. Utrzymuj kopie katalogu wraz z baza i kluczami.
 5. Otworz portal jako czlonek grupy. W prawym gornym rogu widac konto i role; w menu **Ustawienia** uzupelnij Jira URL (`https://firma.atlassian.net`), email konta serwisowego, API token, Cloud ID, AQL, ID atrybutu wlasciciela i liste ID pol dopuszczonych do korekty. Token jest szyfrowany w bazie przy uzyciu ASP.NET Core Data Protection; nie jest zwracany do przegladarki. Pozostawienie pola tokenu pustego zachowuje obecny token.
 6. Gdy workspace ID nie jest znane, zapisz ustawienia i uzyj **Wykryj workspace**, a potem zapisz wykryte ID. Wartosc atrybutu wlasciciela musi odpowiadac `DOMAIN\login` lub `login` (sprawdz odpowiedz Jira).
 

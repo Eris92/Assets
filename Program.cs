@@ -11,6 +11,9 @@ using Microsoft.AspNetCore.Server.IISIntegration;
 using Microsoft.Data.Sqlite;
 
 var builder = WebApplication.CreateBuilder(args);
+var configDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "AssetsPortal");
+builder.Configuration.AddJsonFile(Path.Combine(configDirectory, "appsettings.json"), optional: true, reloadOnChange: true);
+builder.Configuration.AddEnvironmentVariables();
 var dbPath = builder.Configuration["Portal:DatabasePath"] ?? throw new InvalidOperationException("DatabasePath missing");
 var dataDirectory = Path.GetDirectoryName(dbPath) ?? throw new InvalidOperationException("Invalid DatabasePath");
 Directory.CreateDirectory(dataDirectory);
