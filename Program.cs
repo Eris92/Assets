@@ -170,7 +170,7 @@ app.MapPost("/api/admin/settings", async (HttpContext ctx, IAntiforgery anti, Se
         if (!string.IsNullOrWhiteSpace(input.ApiToken)) Save("ApiToken", app.Services.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("JiraApiToken.v1").Protect(input.ApiToken.Trim()));
         transaction.Commit();
-        app.Logger.LogInformation("Settings updated by {User}", ctx.User.Identity.Name);
+        app.Logger.LogInformation("Settings updated by {User}", ctx.User.Identity?.Name);
         return Results.Ok();
     } catch (Exception ex) when (ex is IdentityNotMappedException or ArgumentException) {
         return Results.BadRequest(new { error = "Admin group could not be resolved" });
@@ -234,7 +234,10 @@ app.MapPost("/api/reports", async (HttpContext ctx, IAntiforgery anti, ReportInp
         cmd.Parameters.AddWithValue("$user", ctx.User.Identity.Name);
         cmd.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("O"));
         cmd.ExecuteNonQuery();
-        return Results.Created($"/api/reports/{db.LastInsertRowId}", new { id = db.LastInsertRowId });
+        using var idCommand = db.CreateCommand();
+        idCommand.CommandText = "SELECT last_insert_rowid()";
+        var reportId = (long)idCommand.ExecuteScalar()!;
+        return Results.Created($"/api/reports/{reportId}", new { id = reportId });
     } catch (Exception ex) { app.Logger.LogError(ex, "Report creation failed"); return Results.Problem("Nie udalo sie zapisac zgloszenia.", statusCode: 502); }
 });
 
