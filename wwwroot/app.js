@@ -10,12 +10,21 @@ async function api(path, options = {}) {
 }
 function message(text, error = false) { $('message').textContent = text; $('message').className = error ? 'error' : ''; }
 function view(name) {
-  if ((name === 'admin' || name === 'settings') && !me?.admin) return;
-  for (const item of ['assets','reports','admin','settings']) $(item+'View').hidden = item !== name;
-  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === name));
-  $('title').textContent = ({assets:'Moje zasoby',reports:'Moje zgłoszenia',admin:'Administracja',settings:'Ustawienia'})[name];
-  $('subtitle').textContent = ({assets:'Sprawdź przypisane elementy i zgłoś niezgodność w danych.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.',settings:'Połączenie Jira, uprawnienia administratorów i zakres korekt.'})[name];
-  message(''); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'settings') loadSettings();
+  if ((name === 'admin' || name === 'settings' || name === 'entra') && !me?.admin) return;
+  for (const item of ['assets','team','handover','permissions','teamPermissions','reports','admin','settings','entra']) $(item+'View').hidden = item !== name;
+  document.querySelectorAll('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === name));
+  const equipmentView = name === 'assets' || name === 'team' || name === 'handover';
+  $('equipmentNav').classList.toggle('active', equipmentView);
+  if (equipmentView) { $('equipmentSubnav').hidden = false; $('equipmentNav').setAttribute('aria-expanded', 'true'); }
+  const permissionsView = name === 'permissions' || name === 'teamPermissions';
+  $('permissionsNav').classList.toggle('active', permissionsView);
+  if (permissionsView) { $('permissionsSubnav').hidden = false; $('permissionsNav').setAttribute('aria-expanded','true'); }
+  const settingsView = name === 'settings' || name === 'entra';
+  $('settingsNav').classList.toggle('active', settingsView);
+  if (settingsView) { $('settingsSubnav').hidden = false; $('settingsNav').setAttribute('aria-expanded','true'); }
+  $('title').textContent = ({assets:'M\u00f3j sprz\u0119t',team:'Sprz\u0119t mojego zespo\u0142u',handover:'Zdanie sprz\u0119tu',permissions:'Moje uprawnienia',teamPermissions:'Uprawnienia mojego zespo\u0142u',reports:'Moje zgłoszenia',admin:'Administracja',settings:'Ustawienia - Jira',entra:'Ustawienia - Entra ID'})[name];
+  $('subtitle').textContent = ({assets:'Sprawdz przypisane elementy. Zglos sprzet, ktorego nie posiadasz.',team:'Zasoby bezposrednich i posrednich podwladnych.',handover:'Protok\u00f3\u0142 zdawczo-odbiorczy i zwrot sprz\u0119tu.',teamPermissions:'Dostepy bezposrednich i posrednich podwladnych.',permissions:'Przypisane dostepy do systemow i aplikacji.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.',entra:'Polaczenie Microsoft Entra ID i dane organizacji.',settings:'Połączenie Jira, uprawnienia administratorów i zakres korekt.'})[name];
+  message(''); if (name === 'team') loadTeam(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'settings') loadSettings();
 }
 async function loadSettings() {
   try {
@@ -30,38 +39,65 @@ async function loadAssets() {
   $('assets').innerHTML = '<p class="empty">Pobieranie zasobów…</p>';
   try {
     assets = await api('/api/assets');
-    $('assets').innerHTML = assets.length ? assets.map((a, i) => `<article class="card"><div class="cardTop"><span class="iconBadge">▣</span><span class="key">${escapeHtml(a.key)}</span></div><h3>${escapeHtml(a.name)}</h3><dl class="details">${a.attributes.filter(x => x.value && x.name).slice(0,4).map(x => `<div><dt>${escapeHtml(x.name)}</dt><dd>${escapeHtml(x.value)}</dd></div>`).join('')}</dl><button data-asset="${i}">Zgłoś niezgodność</button></article>`).join('') : '<p class="empty">Brak przypisanych zasobów. Jeśli oczekujesz urządzenia, skontaktuj się z administratorem.</p>';
+    renderPersonalEquipment();
   } catch(e) { $('assets').innerHTML = `<p class="empty">Nie udało się pobrać zasobów. ${escapeHtml(e.message)}</p>`; }
 }
 function statusName(s) { return ({Pending:'Oczekuje',Approved:'Zatwierdzone',Rejected:'Odrzucone'})[s] || s; }
 function reportRow(r, admin) {
-  return `<article class="row"><div><h3>${escapeHtml(r.name)} <span class="key">${escapeHtml(r.key)}</span></h3><p><strong>${escapeHtml(r.attribute)}:</strong> ${escapeHtml(r.oldValue)} → ${escapeHtml(r.proposedValue)}</p><p>${escapeHtml(r.reason)}</p><p class="meta">${escapeHtml(r.reporter)} · ${escapeHtml(new Date(r.createdAt).toLocaleString('pl-PL'))} · ${escapeHtml(r.source)}</p></div>${admin && r.status === 'Pending' ? `<div class="decision"><button data-decision="approve" data-id="${r.id}">Zatwierdź</button><button class="reject" data-decision="reject" data-id="${r.id}">Odrzuć</button></div>` : `<span class="badge ${escapeHtml(r.status)}">${escapeHtml(statusName(r.status))}</span>`}</article>`;
+  return `<article class="row"><div><h3>${escapeHtml(r.name)} <span class="key">${escapeHtml(r.key)}</span></h3><p><strong>${escapeHtml(({ 'not-held':'Nie posiadam tego sprzetu', 'employee-left':'Pracownik juz nie pracuje', assignment:'Nieprawidlowe przypisanie sprzetu' })[r.type] || r.attribute)}:</strong> ${escapeHtml(r.oldValue)} → ${escapeHtml(r.proposedValue)}</p><p>${escapeHtml(r.reason)}</p><p class="meta">${escapeHtml(r.reporter)}${r.affectedEmployee ? ' · Pracownik: ' + escapeHtml(r.affectedEmployee) : ''} · ${escapeHtml(new Date(r.createdAt).toLocaleString('pl-PL'))} · ${escapeHtml(r.source)}</p></div>${admin && r.status === 'Pending' ? `<div class="decision"><button data-decision="approve" data-id="${r.id}">Zatwierdź</button><button class="reject" data-decision="reject" data-id="${r.id}">Odrzuć</button></div>` : `<span class="badge ${escapeHtml(r.status)}">${escapeHtml(statusName(r.status))}</span>`}</article>`;
 }
 async function loadReports() {
   try {
     const rows = await api('/api/reports');
     $('reports').innerHTML = rows.filter(r => r.reporter.toLowerCase() === me.name.toLowerCase()).map(r => reportRow(r,false)).join('') || '<p class="empty">Nie masz jeszcze zgłoszeń.</p>';
-    if (me.admin) { $('adminReports').innerHTML = rows.map(r => reportRow(r,true)).join('') || '<p class="empty">Brak zgłoszeń.</p>'; const count = rows.filter(r => r.status === 'Pending').length; $('pendingCount').textContent = count || ''; }
+    if (me.admin) { $('adminReports').innerHTML = rows.map(r => reportRow(r,true)).join('') || '<p class="empty">Brak zgłoszeń.</p>'; const count = rows.filter(r => r.status === 'Pending').length; $('pendingCount').textContent = String(count); }
   } catch(e) { message(e.message,true); }
 }
+$('permissionsNav').addEventListener('click', () => {
+  const submenu = $('permissionsSubnav');
+  submenu.hidden = !submenu.hidden;
+  $('permissionsNav').setAttribute('aria-expanded', String(!submenu.hidden));
+});
+$('settingsNav').addEventListener('click', () => {
+  const submenu = $('settingsSubnav');
+  submenu.hidden = !submenu.hidden;
+  $('settingsNav').setAttribute('aria-expanded', String(!submenu.hidden));
+});
+$('equipmentNav').addEventListener('click', () => {
+  const submenu = $('equipmentSubnav');
+  submenu.hidden = !submenu.hidden;
+  $('equipmentNav').setAttribute('aria-expanded', String(!submenu.hidden));
+});
 document.querySelector('nav').addEventListener('click', e => { const b = e.target.closest('button[data-view]'); if (b) view(b.dataset.view); });
-$('assets').addEventListener('click', e => {
-  const b = e.target.closest('[data-asset]'); if (!b) return;
-  selected = assets[Number(b.dataset.asset)]; $('dialogTitle').textContent = selected.name;
-  $('attribute').innerHTML = selected.attributes.filter(x => x.id && me.allowedAttributes.includes(x.id)).map(x => `<option value="${escapeHtml(x.id)}">${escapeHtml(x.name)}</option>`).join('');
-  if (!$('attribute').options.length) { message('Brak pól dopuszczonych do korekty dla tego zasobu.', true); return; }
-  $('reportForm').reset(); $('currentValue').textContent = selected.attributes.find(x => x.id === $('attribute').value)?.value || '—';
+function openEquipmentReport(asset, owner = '') {
+  selected = asset;
+  $('reportForm').reset();
+  $('dialogTitle').textContent = asset.name;
+  $('dialogOwner').textContent = owner ? `Przypisany pracownik: ${owner}` : '';
+  for (const option of $('reportType').options) {
+    option.hidden = ['employee-left','assignment'].includes(option.value) && !owner;
+    if (option.value === 'not-held') option.hidden = !!owner;
+  }
+  $('reportType').value = owner ? 'assignment' : 'not-held';
+  $('attribute').innerHTML = asset.attributes.filter(x => x.id && me.allowedAttributes.includes(x.id)).map(x => `<option value="${escapeHtml(x.id)}">${escapeHtml(x.name)}</option>`).join('');
+  $('attributeFields').hidden = true;
+  $('attribute').required = $('proposed').required = false;
+  $('currentValue').textContent = asset.attributes.find(x => x.id === $('attribute').value)?.value || '-';
   $('reportDialog').showModal();
+}
+$('assets').addEventListener('click', e => {
+  const b = e.target.closest('[data-asset]');
+  if (b) openEquipmentReport(assets[Number(b.dataset.asset)]);
 });
 $('attribute').addEventListener('change', () => { $('currentValue').textContent = selected.attributes.find(x => x.id === $('attribute').value)?.value || '—'; });
 $('closeDialog').onclick = $('cancelDialog').onclick = () => $('reportDialog').close();
 $('reportForm').addEventListener('submit', async e => {
-  e.preventDefault(); try { await api('/api/reports',{method:'POST',body:JSON.stringify({objectId:selected.id,attributeId:$('attribute').value,proposedValue:$('proposed').value,reason:$('reason').value})}); $('reportDialog').close(); view('reports'); message('Zgłoszenie zostało zapisane.'); } catch(err) { message(err.message,true); $('reportDialog').close(); }
+  e.preventDefault(); try { await api('/api/reports',{method:'POST',body:JSON.stringify({objectId:selected.id,type:$('reportType').value,attributeId:$('reportType').value === 'attribute' ? $('attribute').value : null,proposedValue:$('reportType').value === 'attribute' ? $('proposed').value : '',reason:$('reason').value})}); $('reportDialog').close(); view('reports'); message('Zgłoszenie zostało zapisane.'); } catch(err) { message(err.message,true); $('reportDialog').close(); }
 });
 $('adminReports').addEventListener('click', async e => {
   const b = e.target.closest('[data-decision]'); if (!b) return;
-  const action = b.dataset.decision; if (!confirm(action === 'approve' ? 'Zatwierdzić i zapisać korektę w Jira?' : 'Odrzucić zgłoszenie?')) return;
-  b.disabled = true; try { await api(`/api/reports/${b.dataset.id}/decision`,{method:'POST',body:JSON.stringify({action})}); await loadReports(); message('Decyzja została zapisana.'); } catch(err) { message(err.message,true); b.disabled = false; }
+  const action = b.dataset.decision; if (!confirm(action === 'approve' ? 'Zatwierdzic zgloszenie i zapisac zmiane w Jira?' : 'Odrzucić zgłoszenie?')) return;
+  b.disabled = true; try { await api(`/api/reports/${b.dataset.id}/decision`,{method:'POST',body:JSON.stringify({action})}); await loadReports(); await loadAssets(); await loadTeam(true); message('Decyzja została zapisana.'); } catch(err) { message(err.message,true); b.disabled = false; }
 });
 $('refresh').onclick = loadAssets; $('refreshAdmin').onclick = loadReports;
 $('settingsForm').addEventListener('submit', async e => {
@@ -84,14 +120,17 @@ $('discoverWorkspace').onclick = async () => {
     else message(ids.length ? `Dostępne workspace ID: ${ids.join(', ')}` : 'Jira nie zwróciła workspace ID.', !ids.length);
   } catch(err) { message(err.message,true); }
 };
+setupEquipmentFilters('asset','assetFilters',renderPersonalEquipment);
 (async () => {
   try {
     me = await api('/api/me');
     $('identity').textContent = me.name || 'Nieznane konto';
     $('identityRole').textContent = me.admin ? 'Administrator' : 'Użytkownik';
     $('accountBadge').textContent = `${me.name} · ${me.admin ? 'Administrator' : 'Użytkownik'}`;
-    $('adminNav').hidden = $('settingsNav').hidden = !me.admin;
-    await loadAssets();
+    $('teamNav').hidden = !me.manager;
+    $('adminNav').hidden = $('settingsGroup').hidden = !me.admin;
+    await Promise.all([loadAssets(), loadReports()]);
+    view('assets');
   } catch(e) {
     $('identity').textContent = 'Brak tożsamości Windows';
     $('identityRole').textContent = 'Nie uwierzytelniono';

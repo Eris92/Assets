@@ -1,6 +1,40 @@
-# Assets Portal (IIS / Windows Authentication)
+# Assets Portal
 
-Pierwsza wersja: przypisane zasoby Jira Assets, zgloszenie korekty, kolejka administratora, zatwierdzenie z zapisem do Jira lub odrzucenie. Repozytorium ma jeden adapter Jira; kolejne zrodla (np. Azure) wymagaja osobnego adaptera i mapowania tozsamosci.
+## Download and build on another Windows PC
+
+```powershell
+git clone https://github.com/Eris92/Assets.git
+Set-Location Assets
+.\scripts\Publish.ps1
+```
+
+Existing checkout:
+
+```powershell
+git pull --ff-only origin main
+.\scripts\Publish.ps1
+```
+
+The production frontend is in `wwwroot`, connected to ASP.NET Core API. `preview/` remains a separate static demonstration. Publishing outputs a self-contained Windows x64 app to `out/AssetsPortal`; .NET 10 SDK is needed to build. IIS still requires the ASP.NET Core Hosting Bundle and Windows Authentication. The script creates configuration in ProgramData only if missing and does not modify IIS or replace a running deployment.
+
+GitHub Actions builds and uploads the ready-to-download `AssetsPortal-win-x64` artifact on every push to main. Download it from the successful workflow run and extract it to the IIS application directory after backing up the prior deployment.
+
+## Integrated UI and reports
+
+- Equipment lists with search, type/status/location filters, sorting, and team hierarchy.
+- Own reports: not-held equipment or attribute correction.
+- Manager reports: employee left, incorrect assignment, or attribute correction.
+- New reports persist in SQLite. Assignment removal occurs only on administrator approval; source changes since reporting produce 409.
+- Permissions, handover protocol, and Entra integration remain placeholders pending data integration.
+- The existing Reports table is extended automatically with Type and AffectedEmployee; existing reports default to attribute correction. Back up portal.db and Data Protection keys before updating.
+
+## Team hierarchy
+
+Copy `team.org.json` to `C:\ProgramData\AssetsPortal\team.json` and replace the sample identities with real `DOMAIN\login`, names, and manager logins. This is an administrator-maintained hierarchy, not automatic AD/Entra discovery. Restrict write access to administrators; grant the application read-only access. The server derives direct and indirect reports from this file and checks ownership when listing or reporting team equipment. An empty or missing file means no team permissions. Windows Authentication determines the caller; admin membership alone does not grant access to other teams.
+
+Jira owner values must match the Windows login or its SAM account name. Ambiguous team ownership is excluded. Approving an assignment report clears the owner attribute; validate that the Jira attribute allows an empty value before production use. Jira errors leave the report pending.
+
+AQL pagination uses the official `startAt`, `maxResults`, and `includeAttributes` query parameters: https://developer.atlassian.com/cloud/assets/rest/api-group-object/#api-object-aql-post. Query cap is 100 pages of up to 100 objects; exceeding the cap returns an error rather than silently returning incomplete equipment.
 
 ## Wymagania
 
@@ -44,7 +78,7 @@ Skrypt `Jira Asset Protocol.ps1` udostepnia AQL `objectType in objectTypeAndChil
 
 ## Ograniczenia pierwszej wersji
 
-- Widok pobiera pierwsze 100 obiektow AQL; trzeba uzgodnic filtr AQL po wlascicielu/paginacje przy wiekszej skali.
+- Widok pobiera strony AQL do limitu opisanego powyzej. Przy duzej skali ogranicz AQL.
 - Korekta obsluguje pojedyncza wartosc tekstowa. Jira API i rzeczywiste typy atrybutow trzeba sprawdzic na reprezentatywnym obiekcie testowym.
 - SQLite nadaje sie do pojedynczej instancji IIS. Przy HA wymagany jest wspolny transactional store i outbox dla operacji w Jira.
 - Zapis w zewnetrznym API i status w bazie nie stanowia jednej transakcji. Przy awarii miedzy PUT i zapisem statusu administrator powinien porownac stan w Jira przed ponowieniem.

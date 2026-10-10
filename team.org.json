@@ -1,0 +1,4 @@
+[
+  {"login":"DOMAIN\\employee1","name":"Employee 1","manager":"DOMAIN\\manager1","role":"Team Leader"},
+  {"login":"DOMAIN\\employee2","name":"Employee 2","manager":"DOMAIN\\employee1","role":"Engineer"}
+]

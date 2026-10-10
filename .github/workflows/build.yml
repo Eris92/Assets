@@ -3,6 +3,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: windows-latest
@@ -11,5 +14,28 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check frontend
+        shell: pwsh
+        run: |
+          Get-ChildItem wwwroot/*.js | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Invalid JavaScript: $($_.Name)" }
+          }
+      - name: Check PowerShell
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/Publish.ps1'), [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
       - run: dotnet restore AssetsPortal.csproj
       - run: dotnet build AssetsPortal.csproj -c Release --no-restore
+      - run: dotnet publish AssetsPortal.csproj -c Release -r win-x64 --self-contained true -o out/AssetsPortal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AssetsPortal-win-x64
+          path: out/AssetsPortal/
+          if-no-files-found: error
