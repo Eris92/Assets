@@ -4,14 +4,22 @@ const $ = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path, options = {}) {
   const url = new URL(path.replace(/^\/+/, ''), appBase);
-  const response = await fetch(url, { credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', ...(options.method ? { 'X-CSRF-TOKEN': me.csrf } : {}), ...options.headers } });
-  if (!response.ok) { let detail; try { const data = await response.json(); detail = data.detail || data.error; } catch {} throw new Error(detail || `HTTP ${response.status}`); }
-  return response.status === 204 ? null : response.json();
+  const response = await fetch(url, { credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', ...(options.method ? { 'X-CSRF-TOKEN': me?.csrf || '' } : {}), ...options.headers } });
+  if (!response.ok) {
+    let detail; try { const data=await response.json();detail=data.detail || data.error; } catch {}
+    const error=new Error(detail || ({401:'IIS nie uwierzytelnil konta Windows.',403:'Konto nie ma dostepu do portalu.',404:'Nie znaleziono API. Sprawdz katalog publikacji oraz mapowanie aplikacji w IIS.'})[response.status] || `HTTP ${response.status}`);
+    error.status=response.status;throw error;
+  }
+  const text=await response.text();
+  if(!text.trim())return null;
+  try{return JSON.parse(text);}catch{const error=new Error('API nie zwrocilo JSON. Sprawdz, czy IIS uruchamia aplikacje ASP.NET Core zamiast statycznego podgladu.');error.status=502;throw error;}
+
 }
 function message(text, error = false) { $('message').textContent = text; $('message').className = error ? 'error' : ''; }
 function view(name) {
-  if ((name === 'admin' || name === 'settings' || name === 'entra') && !me?.admin) return;
-  for (const item of ['assets','team','handover','permissions','teamPermissions','reports','admin','settings','entra']) $(item+'View').hidden = item !== name;
+  if (!me?.allowed) return;
+  if ((name === 'access' || name === 'admin' || name === 'settings' || name === 'entra') && !me?.admin) return;
+  for (const item of ['assets','team','handover','permissions','teamPermissions','reports','admin','settings','entra','access']) $(item+'View').hidden = item !== name;
   document.querySelectorAll('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === name));
   const equipmentView = name === 'assets' || name === 'team' || name === 'handover';
   $('equipmentNav').classList.toggle('active', equipmentView);
@@ -19,12 +27,12 @@ function view(name) {
   const permissionsView = name === 'permissions' || name === 'teamPermissions';
   $('permissionsNav').classList.toggle('active', permissionsView);
   if (permissionsView) { $('permissionsSubnav').hidden = false; $('permissionsNav').setAttribute('aria-expanded','true'); }
-  const settingsView = name === 'settings' || name === 'entra';
+  const settingsView = name === 'settings' || name === 'entra' || name === 'access';
   $('settingsNav').classList.toggle('active', settingsView);
   if (settingsView) { $('settingsSubnav').hidden = false; $('settingsNav').setAttribute('aria-expanded','true'); }
-  $('title').textContent = ({assets:'M\u00f3j sprz\u0119t',team:'Sprz\u0119t mojego zespo\u0142u',handover:'Zdanie sprz\u0119tu',permissions:'Moje uprawnienia',teamPermissions:'Uprawnienia mojego zespo\u0142u',reports:'Moje zgłoszenia',admin:'Administracja',settings:'Ustawienia - Jira',entra:'Ustawienia - Entra ID'})[name];
-  $('subtitle').textContent = ({assets:'Sprawdz przypisane elementy. Zglos sprzet, ktorego nie posiadasz.',team:'Zasoby bezposrednich i posrednich podwladnych.',handover:'Protok\u00f3\u0142 zdawczo-odbiorczy i zwrot sprz\u0119tu.',teamPermissions:'Dostepy bezposrednich i posrednich podwladnych.',permissions:'Przypisane dostepy do systemow i aplikacji.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.',entra:'Polaczenie Microsoft Entra ID i dane organizacji.',settings:'Połączenie Jira, uprawnienia administratorów i zakres korekt.'})[name];
-  message(''); if (name === 'team') loadTeam(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'settings') loadSettings();
+  $('title').textContent = ({assets:'M\u00f3j sprz\u0119t',team:'Sprz\u0119t mojego zespo\u0142u',handover:'Zdanie sprz\u0119tu',permissions:'Moje uprawnienia',teamPermissions:'Uprawnienia mojego zespo\u0142u',reports:'Moje zgłoszenia',admin:'Administracja',access:'Dostep do portalu',settings:'Ustawienia - Jira',entra:'Ustawienia - Entra ID'})[name];
+  $('subtitle').textContent = ({assets:'Sprawdz przypisane elementy. Zglos sprzet, ktorego nie posiadasz.',team:'Zasoby bezposrednich i posrednich podwladnych.',handover:'Protok\u00f3\u0142 zdawczo-odbiorczy i zwrot sprz\u0119tu.',teamPermissions:'Dostepy bezposrednich i posrednich podwladnych.',permissions:'Przypisane dostepy do systemow i aplikacji.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.',access:'Zarzadzanie dostepem uzytkownikow i grup AD.',entra:'Polaczenie Microsoft Entra ID i dane organizacji.',settings:'Połączenie Jira, uprawnienia administratorów i zakres korekt.'})[name];
+  message(''); if (name === 'team') loadTeam(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'settings') loadSettings(); if (name === 'access') loadAccess();
 }
 async function loadSettings() {
   try {
@@ -121,20 +129,38 @@ $('discoverWorkspace').onclick = async () => {
   } catch(err) { message(err.message,true); }
 };
 setupEquipmentFilters('asset','assetFilters',renderPersonalEquipment);
-(async () => {
+function hideProtectedViews() {
+  for(const item of ['assets','team','handover','permissions','teamPermissions','reports','admin','settings','entra','access']) $(item+'View').hidden=true;
+  $('adminNav').hidden=$('settingsGroup').hidden=true;
+}
+async function signIn() {
+  $('authPanel').hidden=true;
+  hideProtectedViews();
+  $('retryLogin').disabled=true;
   try {
-    me = await api('/api/me');
-    $('identity').textContent = me.name || 'Nieznane konto';
-    $('identityRole').textContent = me.admin ? 'Administrator' : 'Użytkownik';
-    $('accountBadge').textContent = `${me.name} · ${me.admin ? 'Administrator' : 'Użytkownik'}`;
-    $('teamNav').hidden = !me.manager;
-    $('adminNav').hidden = $('settingsGroup').hidden = !me.admin;
-    await Promise.all([loadAssets(), loadReports()]);
+    me=await api('/api/me');
+    $('identity').textContent=me.name || 'Nieznane konto';
+    $('identityRole').textContent=me.allowed?(me.admin?'Administrator':'Uzytkownik'):'Brak dostepu do portalu';
+    $('accountBadge').textContent=`${me.name} | ${$('identityRole').textContent}`;
+    if(!me.allowed){
+      $('authPanel').hidden=false;
+      $('authTitle').textContent='Zalogowano do Windows, ale nie nadano dostepu';
+      $('authDetail').textContent=`Konto: ${me.name}. Powod: ${me.accessReason}. Administrator musi dodac konto lub grupe w Ustawienia > Dostep do portalu. Pierwszego administratora konfiguruje sie w ProgramData/AssetsPortal/appsettings.json (Portal:AdminGroup lub Portal:AdminUsers).`;
+      return;
+    }
+    $('teamNav').hidden=!me.manager;
+    $('adminNav').hidden=$('settingsGroup').hidden=!me.admin;
     view('assets');
+    await Promise.all([loadAssets(),loadReports()]);
   } catch(e) {
-    $('identity').textContent = 'Brak tożsamości Windows';
-    $('identityRole').textContent = 'Nie uwierzytelniono';
-    $('accountBadge').textContent = 'Nie zalogowano';
-    $('assets').innerHTML = `<p class="empty">Aplikacja nie otrzymała tożsamości Windows (API: ${escapeHtml(e.message)}). W IIS dla tej aplikacji włącz Windows Authentication i wyłącz Anonymous Authentication, następnie odśwież stronę.</p>`;
-  }
-})();
+    me=null;
+    $('authPanel').hidden=false;
+    $('identity').textContent='Nie odczytano konta';
+    $('identityRole').textContent=e.status===401?'Blad logowania Windows':'Blad aplikacji / API';
+    $('accountBadge').textContent=$('identityRole').textContent;
+    $('authTitle').textContent=e.status===401?'IIS nie przekazal tozsamosci Windows':'Nie udalo sie sprawdzic konta';
+    $('authDetail').textContent=e.message+(e.status===401?' Windows Authentication jest wymagane. Jesli jest juz wlaczone, sprawdz odpowiedz /api/me, kod IIS 401.x i negocjacje przegladarki.':' Sprawdz logi aplikacji i wynik scripts/Test-PortalAccess.ps1.');
+  } finally {$('retryLogin').disabled=false;}
+}
+$('retryLogin').onclick=signIn;
+signIn();

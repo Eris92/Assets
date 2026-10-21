@@ -5,8 +5,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
-    <Content Remove="preview/**;out/**" />
-    <None Remove="preview/**;out/**" />
+    <Content Remove="preview/**;out/**;tests/**" />
+    <Compile Remove="tests/**" />
+    <Content Include="scripts/*.ps1" CopyToPublishDirectory="PreserveNewest" />
+    <None Remove="preview/**;out/**;tests/**" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
   </ItemGroup>

@@ -14,7 +14,7 @@ var builder = WebApplication.CreateBuilder(args);
 var configDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "AssetsPortal");
 builder.Configuration.AddJsonFile(Path.Combine(configDirectory, "appsettings.json"), optional: true, reloadOnChange: true);
 builder.Configuration.AddEnvironmentVariables();
-var dbPath = builder.Configuration["Portal:DatabasePath"] ?? throw new InvalidOperationException("DatabasePath missing");
+var dbPath = builder.Configuration["Portal:DatabasePath"] ?? Path.Combine(configDirectory, "portal.db");
 var dataDirectory = Path.GetDirectoryName(dbPath) ?? throw new InvalidOperationException("Invalid DatabasePath");
 Directory.CreateDirectory(dataDirectory);
 var keyDirectory = Path.Combine(dataDirectory, "keys");
@@ -59,6 +59,21 @@ using (var db = new SqliteConnection(ConnectionString())) {
     }
 }
 
+var access = new AccessControl(ConnectionString(), () => Setting("AdminGroup", "Portal:AdminGroup"), () => app.Configuration.GetSection("Portal:AdminUsers").Get<string[]>() ?? []);
+app.Use(async (ctx, next) => {
+    if (!ctx.Request.Path.StartsWithSegments("/api")) { await next(ctx); return; }
+    ctx.Response.Headers.CacheControl = "no-store";
+    if (ctx.Request.Path == "/api/me") { await next(ctx); return; }
+    if (ctx.User.Identity?.IsAuthenticated != true) { ctx.Response.StatusCode = 401; return; }
+    var decision = access.Check(ctx.User);
+    if (!decision.Allowed) {
+        ctx.Response.StatusCode = 403;
+        await ctx.Response.WriteAsJsonAsync(new { error = "Portal access denied. Ask the administrator to grant access.", reason = decision.Reason });
+        return;
+    }
+    await next(ctx);
+});
+
 string? Setting(string key, string fallback) {
     using var db = new SqliteConnection(ConnectionString()); db.Open();
     using var cmd = db.CreateCommand();
@@ -71,19 +86,7 @@ string[] AllowedAttributes() {
     if (stored is null) return app.Configuration.GetSection("Jira:AllowedCorrectionAttributeIds").Get<string[]>() ?? [];
     return stored.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 }
-bool IsAdmin(ClaimsPrincipal user) {
-    if (user.Identity is not WindowsIdentity identity || !identity.IsAuthenticated) return false;
-    var group = Setting("AdminGroup", "Portal:AdminGroup");
-    if (string.IsNullOrWhiteSpace(group)) return false;
-    try {
-        var sid = group.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)
-            ? new SecurityIdentifier(group)
-            : (SecurityIdentifier)new NTAccount(group).Translate(typeof(SecurityIdentifier));
-        return new WindowsPrincipal(identity).IsInRole(sid);
-    } catch (Exception ex) when (ex is IdentityNotMappedException or ArgumentException) {
-        app.Logger.LogWarning("Configured admin group could not be resolved"); return false;
-    }
-}
+bool IsAdmin(ClaimsPrincipal user) => access.Check(user).Admin;
 IResult AuthError(HttpContext ctx) => ctx.User.Identity?.IsAuthenticated == true ? Results.Forbid() : Results.Unauthorized();
 bool IsValidText(string? s, int max) => !string.IsNullOrWhiteSpace(s) && s.Length <= max;
 string? JiraBase() {
@@ -167,10 +170,42 @@ async Task<List<JsonNode>> QueryAssets() {
 
 app.MapGet("/api/me", (HttpContext ctx, IAntiforgery anti) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
-    var tokens = anti.GetAndStoreTokens(ctx);
+    var decision = access.Check(ctx.User);
+    var tokens = decision.Allowed ? anti.GetAndStoreTokens(ctx) : null;
     return Results.Ok(new { name = ctx.User.Identity.Name, authenticationType = ctx.User.Identity.AuthenticationType,
-        manager = ReportsTo(ctx.User.Identity.Name!).Length > 0, admin = IsAdmin(ctx.User), adminGroup = Setting("AdminGroup", "Portal:AdminGroup"), csrf = tokens.RequestToken,
+        allowed = decision.Allowed, accessReason = decision.Reason, bootstrap = decision.Bootstrap, manager = decision.Allowed && ReportsTo(ctx.User.Identity.Name!).Length > 0, admin = decision.Admin, adminGroup = Setting("AdminGroup", "Portal:AdminGroup"), csrf = tokens?.RequestToken,
         allowedAttributes = AllowedAttributes() });
+});
+
+app.MapGet("/api/admin/access", (HttpContext ctx) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    return Results.Ok(new { rules = access.Rules(), audit = access.Audit(), bootstrapGroup = Setting("AdminGroup", "Portal:AdminGroup"), bootstrapUsers = app.Configuration.GetSection("Portal:AdminUsers").Get<string[]>() ?? [] });
+});
+app.MapPost("/api/admin/access", async (HttpContext ctx, IAntiforgery anti, AccessInput input) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    try {
+        var rule = access.Resolve(input);
+        var current = access.Check(ctx.User);
+        if (!current.Bootstrap && ctx.User.Identity is WindowsIdentity identity &&
+            (rule.Sid == identity.User?.Value || rule.Kind == "Group" && new WindowsPrincipal(identity).IsInRole(new SecurityIdentifier(rule.Sid))))
+            return Results.Conflict(new { error = "Use a bootstrap administrator to change a rule affecting your own access." });
+        access.Save(rule, ctx.User.Identity!.Name!);
+        return Results.Ok(rule);
+    } catch (Exception ex) when (ex is ArgumentException or IdentityNotMappedException) {
+        return Results.BadRequest(new { error = "Account or SID could not be resolved. Use DOMAIN\\account or a valid SID." });
+    }
+});
+app.MapDelete("/api/admin/access/{sid}", async (HttpContext ctx, IAntiforgery anti, string sid) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    var rule = access.Rules().FirstOrDefault(r => r.Sid == sid);
+    if (rule is null) return Results.NotFound();
+    if (!access.Check(ctx.User).Bootstrap && ctx.User.Identity is WindowsIdentity identity &&
+        (rule.Sid == identity.User?.Value || rule.Kind == "Group" && new WindowsPrincipal(identity).IsInRole(new SecurityIdentifier(rule.Sid))))
+        return Results.Conflict(new { error = "Use a bootstrap administrator to remove a rule affecting your own access." });
+    access.Save(rule, ctx.User.Identity!.Name!, remove: true);
+    return Results.NoContent();
 });
 
 app.MapGet("/api/admin/settings", (HttpContext ctx) => {
@@ -198,10 +233,12 @@ app.MapPost("/api/admin/settings", async (HttpContext ctx, IAntiforgery anti, Se
         input.ApiToken?.Length > 1000) return Results.BadRequest(new { error = "Invalid settings" });
     try {
         var group = input.AdminGroup.Trim();
-        var sid = group.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase) ? new SecurityIdentifier(group)
-            : (SecurityIdentifier)new NTAccount(group).Translate(typeof(SecurityIdentifier));
-        if (!new WindowsPrincipal((WindowsIdentity)ctx.User.Identity!).IsInRole(sid))
-            return Results.BadRequest(new { error = "You must belong to the configured admin group" });
+        if (!group.Equals(Setting("AdminGroup", "Portal:AdminGroup"), StringComparison.OrdinalIgnoreCase)) {
+            var sid = group.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase) ? new SecurityIdentifier(group)
+                : (SecurityIdentifier)new NTAccount(group).Translate(typeof(SecurityIdentifier));
+            if (!new WindowsPrincipal((WindowsIdentity)ctx.User.Identity!).IsInRole(sid))
+                return Results.BadRequest(new { error = "You must belong to the configured admin group" });
+        }
         using var db = new SqliteConnection(ConnectionString()); db.Open();
         using var transaction = db.BeginTransaction();
         void Save(string key, string value) {

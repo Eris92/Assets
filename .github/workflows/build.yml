@@ -29,8 +29,11 @@ jobs:
         run: |
           $tokens = $null
           $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/Publish.ps1'), [ref]$tokens, [ref]$parseErrors) | Out-Null
-          if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+          Get-ChildItem scripts/*.ps1 | ForEach-Object {
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+          }
+      - run: dotnet run --project tests/AccessPolicy/AccessPolicy.Tests.csproj -c Release
       - run: dotnet restore AssetsPortal.csproj
       - run: dotnet build AssetsPortal.csproj -c Release --no-restore
       - run: dotnet publish AssetsPortal.csproj -c Release -r win-x64 --self-contained true -o out/AssetsPortal

@@ -1,5 +1,45 @@
 # Assets Portal
 
+## Portal access and Windows sign-in
+
+Windows Authentication in IIS authenticates the user. The portal separately authorizes that Windows identity. There is no local password database or Entra login form.
+
+On the IIS server, run elevated PowerShell from the updated repository:
+
+```powershell
+.\scripts\Initialize-PortalAdmin.ps1 -Account 'DOMAIN\administrator'
+```
+
+This resolves the account to a SID, backs up the existing JSON and adds only the recovery administrator, preserving the other configuration. Omit -Account to use the current elevated Windows account. No password is stored. Reload the portal after running it.
+
+Alternatively, set a recovery administrator in `C:\ProgramData\AssetsPortal\appsettings.json`:
+
+```json
+"Portal": {
+  "AdminUsers": ["DOMAIN\\administrator"],
+  "AdminGroup": "DOMAIN\\Assets-Portal-Admins",
+  "DatabasePath": "C:\\ProgramData\\AssetsPortal\\portal.db"
+}
+```
+
+Merge these keys into the existing Portal object; preserve all existing Jira settings and other keys. AdminUsers accepts full Windows account names or SIDs. Use a real account/group, not the sample names. Recovery administrators have access even if a UI rule blocks them; recovery configuration requires server administrator access. The AdminGroup saved in the database takes precedence over the bootstrap group in the file; AdminUsers is always read from the server file and can recover a stale group setting.
+
+Log in as a recovery administrator and open **Ustawienia > Dostep do portalu**. Add a Windows user or AD group by DOMAIN\account or SID, choose User/Admin and Allow/Deny. Rules are stored by SID. Deny overrides grants except for recovery administrators. Unlisted users are denied by default. Existing authenticated users therefore need an explicit allow rule or an allowed AD group after this update. Delegated administrators cannot change/remove rules matching themselves; a recovery administrator can. All rule changes are audited in SQLite. Removing an allow rule does not block access inherited from another group; add a Deny rule to block it.
+
+All business API routes enforce access on the server. `/api/me` returns the authenticated account and whether portal access is granted; this permits distinguishing successful Windows login from missing authorization. No business data is returned to denied users. Access decisions are re-evaluated on every API request; Windows group membership changes still require a refreshed Windows logon token.
+
+For failed sign-in run (on a domain Windows computer, with the real URL):
+
+```powershell
+.\scripts\Test-PortalAccess.ps1 -PortalUrl 'https://portal.example.com/' -SiteName 'Assets'
+```
+
+The script is read-only, uses the current Windows credentials, preserves TLS validation, prints status/WWW-Authenticate/account/role without CSRF tokens, and reads effective IIS settings if run on the server. For a virtual IIS application pass its full application URL. A 401 means authentication failed, 403 means portal authorization failed, 500/502 indicates application/API failure, and 404 or HTML instead of JSON indicates incorrect deployment/routing. Windows Authentication enabled and Anonymous disabled alone do not establish the cause of a 401: correlate IIS sc-status, sc-substatus and sc-win32-status, URL, browser intranet/SSO settings and Kerberos/SPN negotiation. Do not disable authentication, TLS checks or loopback protection as a workaround.
+
+Official IIS Windows Authentication reference: https://learn.microsoft.com/en-us/aspnet/core/security/authentication/windowsauth?view=aspnetcore-10.0
+
+Backup the application directory, portal.db and Data Protection keys before upgrading. Roll back with the prior app and database backup; older application versions do not enforce the new access rules.
+
 ## Download and build on another Windows PC
 
 ```powershell
