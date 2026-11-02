@@ -1,5 +1,24 @@
 # Assets Portal
 
+## Separate Assets configuration and first deployment
+
+This repository (`Eris92/Assets`) is **not** the separate site at `C:\Sites\AssetsPortal`. Never copy configuration, databases, or DPAPI keys from that other project.
+
+The Assets application uses its own directory `C:\ProgramData\Assets`:
+- `appsettings.json` - configuration and bootstrap administrator SID
+- `Data\portal.db` - SQLite reports, settings, and access rules
+- `Data\keys` - DPAPI-protected data protection keys
+- `team.json` - optional team directory
+
+The production updater automatically creates the Assets configuration from `appsettings.org.json` if missing and bootstraps only the elevated account running deployment as recovery administrator. It never imports data from `C:\Sites\AssetsPortal`. Jira settings (URL, credentials, AQL, workspace and attribute IDs) must be configured for Assets separately in the portal. The updater will not silently invent these credentials. Existing `C:\ProgramData\Assets\appsettings.json` is always preserved.
+
+Run the one-command updater after the GitHub Actions build/release jobs finish:
+
+~~~powershell
+& 'C:\Sites\Assets\scripts\Update-Production.ps1'
+~~~
+
+
 ## One-command GitHub -> IIS production update
 
 Source checkout stays in C:\Sites\Assets. Each released application version goes into C:\Sites\AssetsDeploy\releases\<commit-sha>; IIS Assets-KL points to a separate release directory. No NuGet access or .NET 10 SDK is needed on the server, only the ASP.NET Core Hosting Bundle 10 and IIS Windows Authentication.
@@ -12,14 +31,14 @@ After GitHub Actions Build and release jobs complete, run in elevated Windows Po
 
 That single command performs git pull --ff-only origin main, gets the latest public GitHub Release, verifies that its tag matches the checked-out commit, verifies SHA256 of its ZIP, stages the compiled DLLs, backs up IIS settings/ProgramData, preserves configuration and data, switches the IIS PhysicalPath, sets Windows Authentication enabled and Anonymous disabled, and restarts only the app pool. Local source and production configuration are not overwritten. If the release is still building, it safely stops without changing IIS; rerun after CI succeeds.
 
-Optional parameters: -SiteName, -DeployRoot, -WhatIf, -HealthUrl (requires trusted HTTPS and access for the logged-in account). Deploy backups are stored at C:\ProgramData\AssetsPortal-Deploy\Backups\<timestamp> with restricted ACLs; deployment.json records the prior IIS PhysicalPath. For rollback, point the IIS site back to the prior PhysicalPath, restart its app pool and, only if necessary, restore the matching ProgramData backup. Verify /api/me and /api/assets after deployment.
+Optional parameters: -SiteName, -DeployRoot, -WhatIf, -HealthUrl (requires trusted HTTPS and access for the logged-in account). Deploy backups are stored at C:\ProgramData\Assets-Deploy\Backups\<timestamp> with restricted ACLs; deployment.json records the prior IIS PhysicalPath. For rollback, point the IIS site back to the prior PhysicalPath, restart its app pool and, only if necessary, restore the matching ProgramData backup. Verify /api/me and /api/assets after deployment.
 
 ## Aktualizacja IIS na framework-dependent .NET 10
 
 Repozytorium zawiera tylko kod i szablony; archiwum dzialajacej instalacji zawiera sekrety, logi oraz klucze Data Protection, ktorych nie wolno dodawac do Git ani do paczki release.
 
 1. Zainstaluj **ASP.NET Core Hosting Bundle 10** na serwerze IIS. Sprawdz `dotnet --list-runtimes` - wymagane sa `Microsoft.NETCore.App 10.x` i `Microsoft.AspNetCore.App 10.x`. Skonfiguruj Windows Authentication=Enabled i Anonymous Authentication=Disabled w IIS.
-2. Zrob backup calego katalogu aplikacji, `C:\ProgramData\AssetsPortal\appsettings.json`, `portal.db` oraz katalogu `keys`. Stary `appsettings.json` moze pozostac w katalogu IIS; korzystniej przeniesc go do ProgramData. Jesli w ProgramData jest juz konfiguracja, **nie nadpisuj jej**: ma pierwszenstwo przed plikiem obok DLL. Czesc ustawien Jira ma dodatkowo pierwszenstwo z tabeli Settings w SQLite.
+2. Zrob backup calego katalogu aplikacji, `C:\ProgramData\Assets\appsettings.json`, `portal.db` oraz katalogu `keys`. Stary `appsettings.json` moze pozostac w katalogu IIS; korzystniej przeniesc go do ProgramData. Jesli w ProgramData jest juz konfiguracja, **nie nadpisuj jej**: ma pierwszenstwo przed plikiem obok DLL. Czesc ustawien Jira ma dodatkowo pierwszenstwo z tabeli Settings w SQLite.
 3. Zatrzymaj app pool na czas podmiany plikow. Skopiuj czysty pakiet z `out\AssetsPortal` lub artifact GitHub Actions. Nie kopiuj z 7z starych `coreclr.dll`, `hostfxr.dll`, `AssetsPortal.exe`, logow ani kluczy DPAPI.
 4. Uruchom app pool, przetestuj `/api/me` (200, `allowed:true`) i `/api/assets` (200, JSON) oraz `scripts/Test-PortalAccess.ps1`. Gdy `/api/me` zwraca 401, diagnozuj IIS/Kerberos; gdy 200 z `allowed:false`, dodaj uprawnienia SID z konta administratora odzyskiwania. Nie wylaczaj deny-by-default.
 5. Rollback: przywroc poprzedni pakiet razem z kopia bazy i kluczy. Aktualizacja aplikacji nie cofa korekt wykonanych w Jira.
@@ -39,13 +58,13 @@ On the IIS server, run elevated PowerShell from the updated repository:
 
 This resolves the account to a SID, backs up the existing JSON and adds only the recovery administrator, preserving the other configuration. Omit -Account to use the current elevated Windows account. No password is stored. Reload the portal after running it.
 
-Alternatively, set a recovery administrator in `C:\ProgramData\AssetsPortal\appsettings.json`:
+Alternatively, set a recovery administrator in `C:\ProgramData\Assets\appsettings.json`:
 
 ```json
 "Portal": {
   "AdminUsers": ["DOMAIN\\administrator"],
   "AdminGroup": "DOMAIN\\Assets-Portal-Admins",
-  "DatabasePath": "C:\\ProgramData\\AssetsPortal\\portal.db"
+  "DatabasePath": "C:\\ProgramData\\Assets\\Data\\portal.db"
 }
 ```
 
@@ -97,7 +116,7 @@ GitHub Actions builds and uploads the ready-to-download `AssetsPortal-win-x64` a
 
 ## Team hierarchy
 
-Copy `team.org.json` to `C:\ProgramData\AssetsPortal\team.json` and replace the sample identities with real `DOMAIN\login`, names, and manager logins. This is an administrator-maintained hierarchy, not automatic AD/Entra discovery. Restrict write access to administrators; grant the application read-only access. The server derives direct and indirect reports from this file and checks ownership when listing or reporting team equipment. An empty or missing file means no team permissions. Windows Authentication determines the caller; admin membership alone does not grant access to other teams.
+Copy `team.org.json` to `C:\ProgramData\Assets\team.json` and replace the sample identities with real `DOMAIN\login`, names, and manager logins. This is an administrator-maintained hierarchy, not automatic AD/Entra discovery. Restrict write access to administrators; grant the application read-only access. The server derives direct and indirect reports from this file and checks ownership when listing or reporting team equipment. An empty or missing file means no team permissions. Windows Authentication determines the caller; admin membership alone does not grant access to other teams.
 
 Jira owner values must match the Windows login or its SAM account name. Ambiguous team ownership is excluded. Approving an assignment report clears the owner attribute; validate that the Jira attribute allows an empty value before production use. Jira errors leave the report pending.
 
@@ -114,17 +133,17 @@ AQL pagination uses the official `startAt`, `maxResults`, and `includeAttributes
 
 1. Run `.\scripts\Publish.ps1` on a machine with .NET 10 SDK. Copy the contents of `out\AssetsPortal` into IIS only after backing up the running deployment; never publish directly into the IIS folder.
 2. W IIS utworz aplikacje z osobnym app pool (`No Managed Code`), HTTPS, zainstaluj **ASP.NET Core Hosting Bundle 10** i role service Windows Authentication. Skonfiguruj na poziomie aplikacji/site w IIS: **Windows Authentication = Enabled**, **Anonymous Authentication = Disabled**. Te opcje nie sa teraz w `web.config`, aby uniknac HTTP 500.19, gdy sekcje authentication sa zablokowane.
-3. W repo jest tylko wzor `appsettings.org.json`. Przy pierwszym wdrozeniu skopiuj go do `C:\ProgramData\AssetsPortal\appsettings.json` (jesli plik juz istnieje, nie nadpisuj go):
+3. W repo jest tylko wzor `appsettings.org.json`. Przy pierwszym wdrozeniu skopiuj go do `C:\ProgramData\Assets\appsettings.json` (jesli plik juz istnieje, nie nadpisuj go):
 
    ```powershell
-   New-Item -ItemType Directory -Path 'C:\ProgramData\AssetsPortal' -Force | Out-Null
-   if (-not (Test-Path 'C:\ProgramData\AssetsPortal\appsettings.json')) {
-       Copy-Item 'C:\Sites\AssetsPortal\appsettings.org.json' 'C:\ProgramData\AssetsPortal\appsettings.json'
+   New-Item -ItemType Directory -Path 'C:\ProgramData\Assets' -Force | Out-Null
+   if (-not (Test-Path 'C:\ProgramData\Assets\appsettings.json')) {
+       Copy-Item 'C:\Sites\Assets\appsettings.org.json' 'C:\ProgramData\Assets\appsettings.json'
    }
    ```
 
    Ustaw tam `Portal:AdminGroup` na pelna nazwe grupy AD, np. `DOMAIN\\Assets-Portal-Admins`, lub SID. To bootstrap administratora; sama grupa nie uwierzytelnia uzytkownika, najpierw IIS musi przekazac Windows identity do `/api/me`. Po pierwszym zapisie w panelu grupa jest rowniez utrwalona w SQLite. Aplikacja nadal odczyta stary `appsettings.json` z katalogu aplikacji, jesli jeszcze nie przeniosles go do ProgramData; konfiguracja z ProgramData ma pierwszenstwo. Kolejny `dotnet publish` nie nadpisze pliku w ProgramData.
-4. Ustaw ACL na `C:\ProgramData\AssetsPortal` dla tozsamosci app pool (Modify) pod SQLite i klucze Data Protection; ogranicz dostep innym kontom. Dla samego `appsettings.json` ustaw aplikacji tylko odczyt, a zapis pozostaw administratorom serwera. Utrzymuj kopie katalogu wraz z baza i kluczami.
+4. Ustaw ACL na `C:\ProgramData\Assets` dla tozsamosci app pool (Modify) pod SQLite i klucze Data Protection; ogranicz dostep innym kontom. Dla samego `appsettings.json` ustaw aplikacji tylko odczyt, a zapis pozostaw administratorom serwera. Utrzymuj kopie katalogu wraz z baza i kluczami.
 5. Otworz portal jako czlonek grupy. W prawym gornym rogu widac konto i role; w menu **Ustawienia** uzupelnij Jira URL (`https://firma.atlassian.net`), email konta serwisowego, API token, Cloud ID, AQL, ID atrybutu wlasciciela i liste ID pol dopuszczonych do korekty. Token jest szyfrowany w bazie przy uzyciu ASP.NET Core Data Protection; nie jest zwracany do przegladarki. Pozostawienie pola tokenu pustego zachowuje obecny token.
 6. Gdy workspace ID nie jest znane, zapisz ustawienia i uzyj **Wykryj workspace**, a potem zapisz wykryte ID. Wartosc atrybutu wlasciciela musi odpowiadac `DOMAIN\login` lub `login` (sprawdz odpowiedz Jira).
 

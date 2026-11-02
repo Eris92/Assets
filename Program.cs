@@ -11,15 +11,15 @@ using Microsoft.AspNetCore.Server.IISIntegration;
 using Microsoft.Data.Sqlite;
 
 var builder = WebApplication.CreateBuilder(args);
-var configDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "AssetsPortal");
+var configDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Assets");
 builder.Configuration.AddJsonFile(Path.Combine(configDirectory, "appsettings.json"), optional: true, reloadOnChange: true);
 builder.Configuration.AddEnvironmentVariables();
-var dbPath = builder.Configuration["Portal:DatabasePath"] ?? Path.Combine(configDirectory, "portal.db");
+var dbPath = builder.Configuration["Portal:DatabasePath"] ?? Path.Combine(configDirectory, "Data", "portal.db");
 var dataDirectory = Path.GetDirectoryName(dbPath) ?? throw new InvalidOperationException("Invalid DatabasePath");
 Directory.CreateDirectory(dataDirectory);
 var keyDirectory = Path.Combine(dataDirectory, "keys");
 Directory.CreateDirectory(keyDirectory);
-builder.Services.AddDataProtection().SetApplicationName("AssetsPortal")
+builder.Services.AddDataProtection().SetApplicationName("Assets-WEB")
     .PersistKeysToFileSystem(new DirectoryInfo(keyDirectory)).ProtectKeysWithDpapi();
 builder.Services.AddAuthentication(IISDefaults.AuthenticationScheme);
 builder.Services.AddAuthorization();

@@ -2,7 +2,6 @@
 param(
     [string]$SiteName = 'Assets-KL',
     [string]$DeployRoot = 'C:\Sites\AssetsDeploy',
-    [string]$ConfigSourcePath,
     [string]$HealthUrl
 )
 
@@ -132,37 +131,40 @@ if (Test-Path -LiteralPath $newPath) {
 }
 
 $temp = Join-Path $env:TEMP ('AssetsPortal_' + [guid]::NewGuid().ToString('N'))
-$backupRoot = Join-Path $env:ProgramData 'AssetsPortal-Deploy\Backups'
+$backupRoot = Join-Path $env:ProgramData 'Assets-Deploy\Backups'
 $backupName = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
 $backupDir = Join-Path $backupRoot $backupName
-$dataPath = Join-Path $env:ProgramData 'AssetsPortal'
-$liveConfig = Join-Path $oldPath 'appsettings.json'
+$dataPath = Join-Path $env:ProgramData 'Assets'
+$dataDirectory = Join-Path $dataPath 'Data'
 $newConfig = Join-Path $dataPath 'appsettings.json'
-# Never switch IIS to a package without the existing production Jira settings.
-# The earlier manual deployment used C:\Sites\AssetsPortal while IIS pointed at C:\Sites\Assets.
-$configCandidates = @()
-if (-not [string]::IsNullOrWhiteSpace($ConfigSourcePath)) {
-    $configCandidates += [IO.Path]::GetFullPath($ConfigSourcePath)
-}
-$configCandidates += $liveConfig
-$configCandidates += 'C:\Sites\AssetsPortal\appsettings.json'
+$legacyAssetsConfig = Join-Path $repoRoot 'appsettings.json'
+$configTemplate = Join-Path $repoRoot 'appsettings.org.json'
+# Configuration, SQLite and DPAPI keys belong only to Eris92/Assets.
+# Do not import settings from a different IIS project or application.
 $configSource = $null
-if (-not (Test-Path -LiteralPath $newConfig -PathType Leaf)) {
-    $configSource = @($configCandidates | Select-Object -Unique | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
-    if ($configSource.Count -eq 0) {
-        throw "Production configuration missing. Restore C:\ProgramData\AssetsPortal\appsettings.json or pass -ConfigSourcePath 'C:\path\appsettings.json'. IIS was not changed."
-    }
-    $configSource = [string]$configSource[0]
-} else {
+if (Test-Path -LiteralPath $newConfig -PathType Leaf) {
     $configSource = $newConfig
+} elseif (Test-Path -LiteralPath $legacyAssetsConfig -PathType Leaf) {
+    $configSource = $legacyAssetsConfig
+} elseif (Test-Path -LiteralPath $configTemplate -PathType Leaf) {
+    $configSource = $configTemplate
+} else {
+    throw 'Assets configuration template is missing from the checkout. IIS was not changed.'
 }
 try {
     $cfg = Get-Content -LiteralPath $configSource -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     if ($null -eq $cfg.Jira -or $null -eq $cfg.Portal) {
         throw 'Missing Jira or Portal section.'
     }
+    $dbConfig = [string]$cfg.Portal.DatabasePath
+    if (-not [string]::IsNullOrWhiteSpace($dbConfig)) {
+        $dbFull = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($dbConfig))
+        if (-not $dbFull.StartsWith($dataPath.TrimEnd($separator) + $separator, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Portal:DatabasePath must be inside $dataPath, not $dbFull."
+        }
+    }
 } catch {
-    throw "Invalid JSON configuration at $configSource. IIS was not changed. $($_.Exception.Message)"
+    throw "Invalid Assets configuration at $configSource. IIS was not changed. $($_.Exception.Message)"
 }
 $poolWasStarted = (Get-WebAppPoolState -Name $poolName).Value -eq 'Started'
 $stopped = $false
@@ -217,14 +219,30 @@ try {
     Stop-AppPoolSafely -Name $poolName
     Wait-AppPoolState -Name $poolName -Expected 'Stopped'
     if (Test-Path -LiteralPath $dataPath) {
-        Copy-Item -LiteralPath $dataPath -Destination (Join-Path $backupDir 'AssetsPortalData') -Recurse -Force
+        Copy-Item -LiteralPath $dataPath -Destination (Join-Path $backupDir 'AssetsData') -Recurse -Force
     }
     if (-not (Test-Path -LiteralPath $newConfig -PathType Leaf)) {
-        Copy-Item -LiteralPath $configSource -Destination (Join-Path $backupDir 'previous-appsettings.json') -Force
-        New-Item -Path $dataPath -ItemType Directory -Force | Out-Null
-        Copy-Item -LiteralPath $configSource -Destination $newConfig -ErrorAction Stop
-        Write-Host "Preserved production configuration from $configSource in ProgramData."
+        if ($configSource -eq $configTemplate) {
+            # Bootstrap only on the first deployment. The elevated operator
+            # becomes the recovery admin, without granting broad AD access.
+            & (Join-Path $repoRoot 'scripts\Initialize-PortalAdmin.ps1') -Account ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
+            if (-not (Test-Path -LiteralPath $newConfig -PathType Leaf)) {
+                throw 'Initial Assets config bootstrap did not create appsettings.json.'
+            }
+            Write-Host "Initialized separate Assets settings at $newConfig. Configure Jira using the web admin panel."
+        } else {
+            New-Item -Path $dataPath -ItemType Directory -Force | Out-Null
+            Copy-Item -LiteralPath $configSource -Destination $newConfig -ErrorAction Stop
+            Write-Host "Migrated Assets settings from Git checkout into $newConfig."
+        }
     }
+    New-Item -Path $dataDirectory -ItemType Directory -Force | Out-Null
+    # Keep the config file read-only for IIS. DB and DP keys are under Data.
+    $poolSid = "IIS AppPool\$poolName"
+    & icacls.exe $dataPath '/grant' ($poolSid + ':(OI)(CI)RX') | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Unable to grant read access for $poolSid on Assets settings." }
+    & icacls.exe $dataDirectory '/grant' ($poolSid + ':(OI)(CI)M') | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Unable to grant write access for $poolSid on Assets database and DP keys." }
     Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Location $SiteName -Filter $winFilter -Name enabled -Value $true
     $changed = $true
     Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Location $SiteName -Filter $anonFilter -Name enabled -Value $false

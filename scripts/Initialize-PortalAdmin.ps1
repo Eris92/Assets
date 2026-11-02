@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $identity = New-Object Security.Principal.NTAccount($Account)
 $sid = $identity.Translate([Security.Principal.SecurityIdentifier]).Value
 if (-not $env:ProgramData) { throw 'ProgramData is unavailable. Run on the Windows web server.' }
-$configPath = Join-Path $env:ProgramData 'AssetsPortal\appsettings.json'
+$configPath = Join-Path $env:ProgramData 'Assets\appsettings.json'
 $template = Join-Path (Split-Path $PSScriptRoot -Parent) 'appsettings.org.json'
 if (Test-Path -LiteralPath $configPath) {
     $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
