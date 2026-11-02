@@ -1,5 +1,18 @@
 # Assets Portal
 
+## Aktualizacja IIS na framework-dependent .NET 10
+
+Repozytorium zawiera tylko kod i szablony; archiwum dzialajacej instalacji zawiera sekrety, logi oraz klucze Data Protection, ktorych nie wolno dodawac do Git ani do paczki release.
+
+1. Zainstaluj **ASP.NET Core Hosting Bundle 10** na serwerze IIS. Sprawdz `dotnet --list-runtimes` - wymagane sa `Microsoft.NETCore.App 10.x` i `Microsoft.AspNetCore.App 10.x`. Skonfiguruj Windows Authentication=Enabled i Anonymous Authentication=Disabled w IIS.
+2. Zrob backup calego katalogu aplikacji, `C:\ProgramData\AssetsPortal\appsettings.json`, `portal.db` oraz katalogu `keys`. Stary `appsettings.json` moze pozostac w katalogu IIS; korzystniej przeniesc go do ProgramData. Jesli w ProgramData jest juz konfiguracja, **nie nadpisuj jej**: ma pierwszenstwo przed plikiem obok DLL. Czesc ustawien Jira ma dodatkowo pierwszenstwo z tabeli Settings w SQLite.
+3. Zatrzymaj app pool na czas podmiany plikow. Skopiuj czysty pakiet z `out\AssetsPortal` lub artifact GitHub Actions. Nie kopiuj z 7z starych `coreclr.dll`, `hostfxr.dll`, `AssetsPortal.exe`, logow ani kluczy DPAPI.
+4. Uruchom app pool, przetestuj `/api/me` (200, `allowed:true`) i `/api/assets` (200, JSON) oraz `scripts/Test-PortalAccess.ps1`. Gdy `/api/me` zwraca 401, diagnozuj IIS/Kerberos; gdy 200 z `allowed:false`, dodaj uprawnienia SID z konta administratora odzyskiwania. Nie wylaczaj deny-by-default.
+5. Rollback: przywroc poprzedni pakiet razem z kopia bazy i kluczy. Aktualizacja aplikacji nie cofa korekt wykonanych w Jira.
+
+Publikacja przez `scripts/Publish.ps1` dziala tylko wewnatrz katalogu `out` repozytorium i usuwa stary wygenerowany output przed kompilacja. Celowo nie zapisuje niczego w ProgramData ani w katalogu produkcyjnym.
+
+
 ## Portal access and Windows sign-in
 
 Windows Authentication in IIS authenticates the user. The portal separately authorizes that Windows identity. There is no local password database or Entra login form.
@@ -55,7 +68,7 @@ git pull --ff-only origin main
 .\scripts\Publish.ps1
 ```
 
-The production frontend is in `wwwroot`, connected to ASP.NET Core API. `preview/` remains a separate static demonstration. Publishing outputs a self-contained Windows x64 app to `out/AssetsPortal`; .NET 10 SDK is needed to build. IIS still requires the ASP.NET Core Hosting Bundle and Windows Authentication. The script creates configuration in ProgramData only if missing and does not modify IIS or replace a running deployment.
+The production frontend is in `wwwroot`, connected to ASP.NET Core API. Publishing generates a framework-dependent .NET 10 Windows package in `out/AssetsPortal`, without a bundled runtime or apphost EXE. .NET 10 SDK is only needed to build. IIS requires Hosting Bundle 10 and Windows Authentication. The build script never creates or changes server configuration and refuses to erase live data.
 
 GitHub Actions builds and uploads the ready-to-download `AssetsPortal-win-x64` artifact on every push to main. Download it from the successful workflow run and extract it to the IIS application directory after backing up the prior deployment.
 
@@ -85,8 +98,8 @@ AQL pagination uses the official `startAt`, `maxResults`, and `includeAttributes
 
 ## Konfiguracja
 
-1. `dotnet publish .\AssetsPortal.csproj -c Release -o C:\Sites\AssetsPortal`
-2. W IIS utworz aplikacje z osobnym app pool (`No Managed Code`), HTTPS i zainstaluj role service **Windows Authentication**. `web.config` wlacza Windows Authentication i wylacza Anonymous Authentication; sprawdz wynik w IIS > aplikacja > Authentication. Jesli IIS blokuje te sekcje, ustaw je na poziomie site w IIS i odblokuj delegowanie konfiguracji lub usun sekcje `<security>` z `web.config`.
+1. Run `.\scripts\Publish.ps1` on a machine with .NET 10 SDK. Copy the contents of `out\AssetsPortal` into IIS only after backing up the running deployment; never publish directly into the IIS folder.
+2. W IIS utworz aplikacje z osobnym app pool (`No Managed Code`), HTTPS, zainstaluj **ASP.NET Core Hosting Bundle 10** i role service Windows Authentication. Skonfiguruj na poziomie aplikacji/site w IIS: **Windows Authentication = Enabled**, **Anonymous Authentication = Disabled**. Te opcje nie sa teraz w `web.config`, aby uniknac HTTP 500.19, gdy sekcje authentication sa zablokowane.
 3. W repo jest tylko wzor `appsettings.org.json`. Przy pierwszym wdrozeniu skopiuj go do `C:\ProgramData\AssetsPortal\appsettings.json` (jesli plik juz istnieje, nie nadpisuj go):
 
    ```powershell
@@ -101,7 +114,7 @@ AQL pagination uses the official `startAt`, `maxResults`, and `includeAttributes
 5. Otworz portal jako czlonek grupy. W prawym gornym rogu widac konto i role; w menu **Ustawienia** uzupelnij Jira URL (`https://firma.atlassian.net`), email konta serwisowego, API token, Cloud ID, AQL, ID atrybutu wlasciciela i liste ID pol dopuszczonych do korekty. Token jest szyfrowany w bazie przy uzyciu ASP.NET Core Data Protection; nie jest zwracany do przegladarki. Pozostawienie pola tokenu pustego zachowuje obecny token.
 6. Gdy workspace ID nie jest znane, zapisz ustawienia i uzyj **Wykryj workspace**, a potem zapisz wykryte ID. Wartosc atrybutu wlasciciela musi odpowiadac `DOMAIN\login` lub `login` (sprawdz odpowiedz Jira).
 
-API Jira Assets uzywa Basic auth z `email:API token`. Portal tworzy adres API na podstawie Cloud ID i workspace ID, zamiast wymagac recznego wpisywania calego URL.
+API Jira Assets uzywa Basic auth z `email:API token` i tworzy adres z Cloud ID i workspace ID. Starszy `Jira:BaseUrl` z Bearer tokenem jest nadal odczytywany, ale tylko gdy wskazuje na `https://api.atlassian.com/ex/jira/.../jsm/assets/workspace/...`. Przy migracji nie kopiuj kluczy DPAPI z archiwum na inny serwer/kontekst; zachowaj oryginalny katalog kluczy aktualnej instancji i jej baze danych.
 
 ### Diagnostyka 401 / brak administratora
 

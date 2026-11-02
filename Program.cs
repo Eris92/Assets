@@ -92,8 +92,16 @@ bool IsValidText(string? s, int max) => !string.IsNullOrWhiteSpace(s) && s.Lengt
 string? JiraBase() {
     var cloudId = Setting("CloudId", "Jira:CloudId");
     var workspaceId = Setting("WorkspaceId", "Jira:WorkspaceId");
-    if (!Guid.TryParse(cloudId, out _) || !Guid.TryParse(workspaceId, out _)) return null;
-    return $"https://api.atlassian.com/ex/jira/{cloudId}/jsm/assets/workspace/{workspaceId}/v1/";
+    if (Guid.TryParse(cloudId, out _) && Guid.TryParse(workspaceId, out _))
+        return $"https://api.atlassian.com/ex/jira/{cloudId}/jsm/assets/workspace/{workspaceId}/v1/";
+    // Read the original Bearer-token BaseUrl only when it targets Atlassian.
+    var legacy = app.Configuration["Jira:BaseUrl"];
+    if (Uri.TryCreate(legacy, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps &&
+        uri.IsDefaultPort && uri.Host.Equals("api.atlassian.com", StringComparison.OrdinalIgnoreCase) &&
+        uri.AbsolutePath.StartsWith("/ex/jira/", StringComparison.OrdinalIgnoreCase) &&
+        uri.AbsolutePath.Contains("/jsm/assets/workspace/", StringComparison.OrdinalIgnoreCase))
+        return uri.GetLeftPart(UriPartial.Path).TrimEnd('/') + "/";
+    return null;
 }
 string? JiraToken() {
     var encrypted = Setting("ApiToken", "Jira:EncryptedToken");
@@ -104,8 +112,12 @@ string? JiraToken() {
 AuthenticationHeaderValue JiraAuthorization() {
     var email = Setting("AccountEmail", "Jira:AccountEmail");
     var token = JiraToken();
-    if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(token)) throw new InvalidOperationException("Jira credentials are not configured");
-    return new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{email}:{token}")));
+    if (string.IsNullOrWhiteSpace(token)) throw new InvalidOperationException("Jira credentials are not configured");
+    if (!string.IsNullOrWhiteSpace(email))
+        return new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{email}:{token}")));
+    if (!string.IsNullOrWhiteSpace(app.Configuration["Jira:BaseUrl"]))
+        return new AuthenticationHeaderValue("Bearer", token);
+    throw new InvalidOperationException("Jira AccountEmail is not configured");
 }
 async Task<JsonNode> Jira(HttpMethod method, string path, object? body = null) {
     var baseUrl = JiraBase() ?? throw new InvalidOperationException("Jira BaseUrl is not configured");

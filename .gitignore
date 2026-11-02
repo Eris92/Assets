@@ -1,4 +1,19 @@
-appsettings.json
-appsettings.Production.json
+# Build output
 bin/
 obj/
+out/
+.vs/
+
+# Production secrets, data and archives (never commit)
+appsettings.json
+appsettings.Production.json
+**/appsettings.json
+**/appsettings.Production.json
+**/DataProtection-Keys/
+**/keys/
+**/logs/
+*.db
+*.db-shm
+*.db-wal
+*.7z
+*.zip
