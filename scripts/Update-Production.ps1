@@ -167,13 +167,36 @@ $configTemplate = Join-Path $repoRoot 'appsettings.org.json'
 # Do not import settings from a different IIS project or application.
 $configSource = $null
 if (Test-Path -LiteralPath $newConfig -PathType Leaf) {
+    # Never silently replace an established production configuration.
     $configSource = $newConfig
 } elseif (Test-Path -LiteralPath $legacyAssetsConfig -PathType Leaf) {
-    $configSource = $legacyAssetsConfig
-} elseif (Test-Path -LiteralPath $configTemplate -PathType Leaf) {
+    # A checkout may retain an old appsettings.json from an unrelated project.
+    # Import it only when it references the isolated Assets data directory.
+    try {
+        $legacy = Get-Content -LiteralPath $legacyAssetsConfig -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $legacy.Jira -or $null -eq $legacy.Portal) {
+            throw 'Missing Jira or Portal section.'
+        }
+        $legacyDb = [string]$legacy.Portal.DatabasePath
+        if ([string]::IsNullOrWhiteSpace($legacyDb)) {
+            $configSource = $legacyAssetsConfig
+        } else {
+            $legacyDbFull = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($legacyDb))
+            if ($legacyDbFull.StartsWith($dataPath.TrimEnd($separator) + $separator, [StringComparison]::OrdinalIgnoreCase)) {
+                $configSource = $legacyAssetsConfig
+            } else {
+                Write-Warning "Ignoring checkout appsettings.json: its DatabasePath is outside the Assets data directory. The original file was not modified."
+            }
+        }
+    } catch {
+        Write-Warning "Ignoring invalid checkout appsettings.json. The original file was not modified: $($_.Exception.Message)"
+    }
+}
+if ($null -eq $configSource) {
+    if (-not (Test-Path -LiteralPath $configTemplate -PathType Leaf)) {
+        throw 'Assets configuration template is missing from the checkout. IIS was not changed.'
+    }
     $configSource = $configTemplate
-} else {
-    throw 'Assets configuration template is missing from the checkout. IIS was not changed.'
 }
 try {
     $cfg = Get-Content -LiteralPath $configSource -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
