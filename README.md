@@ -1,5 +1,19 @@
 # Assets Portal
 
+## One-command GitHub -> IIS production update
+
+Source checkout stays in C:\Sites\Assets. Each released application version goes into C:\Sites\AssetsDeploy\releases\<commit-sha>; IIS Assets-KL points to a separate release directory. No NuGet access or .NET 10 SDK is needed on the server, only the ASP.NET Core Hosting Bundle 10 and IIS Windows Authentication.
+
+After GitHub Actions Build and release jobs complete, run in elevated Windows PowerShell:
+
+~~~powershell
+& 'C:\Sites\Assets\scripts\Update-Production.ps1'
+~~~
+
+That single command performs git pull --ff-only origin main, gets the latest public GitHub Release, verifies that its tag matches the checked-out commit, verifies SHA256 of its ZIP, stages the compiled DLLs, backs up IIS settings/ProgramData, preserves configuration and data, switches the IIS PhysicalPath, sets Windows Authentication enabled and Anonymous disabled, and restarts only the app pool. Local source and production configuration are not overwritten. If the release is still building, it safely stops without changing IIS; rerun after CI succeeds.
+
+Optional parameters: -SiteName, -DeployRoot, -WhatIf, -HealthUrl (requires trusted HTTPS and access for the logged-in account). Deploy backups are stored at C:\ProgramData\AssetsPortal-Deploy\Backups\<timestamp> with restricted ACLs; deployment.json records the prior IIS PhysicalPath. For rollback, point the IIS site back to the prior PhysicalPath, restart its app pool and, only if necessary, restore the matching ProgramData backup. Verify /api/me and /api/assets after deployment.
+
 ## Aktualizacja IIS na framework-dependent .NET 10
 
 Repozytorium zawiera tylko kod i szablony; archiwum dzialajacej instalacji zawiera sekrety, logi oraz klucze Data Protection, ktorych nie wolno dodawac do Git ani do paczki release.

@@ -53,3 +53,26 @@ jobs:
           name: AssetsPortal-win-x64
           path: out/AssetsPortal/
           if-no-files-found: error
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: AssetsPortal-win-x64
+          path: package
+      - name: Package release and SHA256
+        shell: pwsh
+        run: |
+          Compress-Archive -Path package/* -DestinationPath AssetsPortal-win-x64.zip
+          $hash = (Get-FileHash AssetsPortal-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'AssetsPortal-win-x64.zip.sha256'), $hash, [Text.Encoding]::ASCII)
+      - name: Publish verified release for commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "assets-$env:GITHUB_SHA" AssetsPortal-win-x64.zip AssetsPortal-win-x64.zip.sha256 --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" --title "Assets Portal $env:GITHUB_SHA" --notes "Windows x64 framework-dependent .NET 10 release." --latest
