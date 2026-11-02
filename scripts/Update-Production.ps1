@@ -117,6 +117,12 @@ foreach ($asset in @($zip[0], $sum[0])) {
     }
 }
 $oldPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$site.PhysicalPath))
+# Refuse to deploy into a site pointing at an unrelated application.
+$releaseRoot = [IO.Path]::GetFullPath((Join-Path $deployRootFull 'releases')).TrimEnd($separator) + $separator
+if (-not $oldPath.TrimEnd($separator).Equals($repoRoot.TrimEnd($separator), [StringComparison]::OrdinalIgnoreCase) -and
+    -not $oldPath.StartsWith($releaseRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "IIS site $SiteName points outside the Assets checkout/deploy root: $oldPath. No changes were made."
+}
 $newPath = Join-Path $deployRootFull (Join-Path 'releases' $commit)
 if ($oldPath.TrimEnd($separator).Equals($newPath.TrimEnd($separator), [StringComparison]::OrdinalIgnoreCase)) {
     Write-Host "Already active: $commit"
