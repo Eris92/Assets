@@ -325,15 +325,61 @@ app.MapPost("/api/admin/settings", async (HttpContext ctx, IAntiforgery anti, Se
 app.MapGet("/api/admin/jira/workspaces", async (HttpContext ctx) => {
     if (!IsAdmin(ctx.User)) return AuthError(ctx);
     var siteUrl = Setting("SiteUrl", "Jira:SiteUrl");
-    if (string.IsNullOrWhiteSpace(siteUrl)) return Results.Problem("Configure Jira site URL", statusCode: 503);
+    var cloudId = Setting("CloudId", "Jira:CloudId");
+    var endpoints = new List<(string Name, Uri Url)>();
+    if (Uri.TryCreate(siteUrl, UriKind.Absolute, out var site) &&
+        site.Scheme == Uri.UriSchemeHttps && site.IsDefaultPort &&
+        string.IsNullOrEmpty(site.UserInfo) &&
+        site.Host.EndsWith(".atlassian.net", StringComparison.OrdinalIgnoreCase)) {
+        endpoints.Add(("Jira site", new Uri(site.GetLeftPart(UriPartial.Authority) + "/rest/servicedeskapi/assets/workspace")));
+    }
+    if (Guid.TryParse(cloudId, out var cloudGuid)) {
+        endpoints.Add(("Atlassian gateway", new Uri($"https://api.atlassian.com/ex/jira/{cloudGuid:D}/rest/servicedeskapi/assets/workspace")));
+    }
+    if (endpoints.Count == 0)
+        return Results.Problem("Configure a valid Jira site URL or Cloud ID.", statusCode: 503);
+
     try {
-        using var request = new HttpRequestMessage(HttpMethod.Get, siteUrl.TrimEnd('/') + "/rest/servicedeskapi/assets/workspace");
-        request.Headers.Authorization = JiraAuthorization();
+        var authorization = JiraAuthorization();
         using var client = app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("jira");
-        using var response = await client.SendAsync(request);
-        response.EnsureSuccessStatusCode();
-        return Results.Content(await response.Content.ReadAsStringAsync(), "application/json");
-    } catch (Exception ex) { app.Logger.LogError(ex, "Workspace discovery failed"); return Results.Problem("Nie udalo sie pobrac workspace Jira.", statusCode: 502); }
+        var failures = new List<string>();
+        foreach (var endpoint in endpoints) {
+            using var request = new HttpRequestMessage(HttpMethod.Get, endpoint.Url);
+            request.Headers.Authorization = authorization;
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            using var response = await client.SendAsync(request, ctx.RequestAborted);
+            var payload = await response.Content.ReadAsStringAsync(ctx.RequestAborted);
+            if (response.IsSuccessStatusCode) {
+                try {
+                    using var document = JsonDocument.Parse(payload);
+                    if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                        !document.RootElement.TryGetProperty("values", out var values) ||
+                        values.ValueKind != JsonValueKind.Array)
+                        throw new JsonException("Workspace response does not contain a values array.");
+                    return Results.Content(payload, "application/json");
+                } catch (JsonException ex) {
+                    app.Logger.LogWarning(ex, "Unexpected workspace response from {Endpoint}", endpoint.Name);
+                    failures.Add($"{endpoint.Name}: invalid JSON response");
+                    continue;
+                }
+            }
+            app.Logger.LogWarning("Jira workspace discovery via {Endpoint} returned HTTP {Status}",
+                endpoint.Name, (int)response.StatusCode);
+            failures.Add($"{endpoint.Name}: HTTP {(int)response.StatusCode}");
+        }
+        var details = string.Join("; ", failures);
+        app.Logger.LogWarning("Workspace discovery failed: {Reasons}", details);
+        return Results.Problem(
+            $"Jira workspace discovery failed ({details}). Check API token permissions and authentication method.",
+            statusCode: 502);
+    } catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) {
+        return Results.StatusCode(499);
+    } catch (Exception ex) {
+        app.Logger.LogError(ex, "Workspace discovery failed before Jira returned a usable response");
+        return Results.Problem(
+            "Workspace discovery failed before receiving a valid Jira response. Check server logs and encrypted token access.",
+            statusCode: 502);
+    }
 });
 
 app.MapGet("/api/assets", async (HttpContext ctx) => {
