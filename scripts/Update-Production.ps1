@@ -96,14 +96,32 @@ $commit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'Invalid HEAD SHA.' }
 
 $headers = @{ 'User-Agent' = 'AssetsPortal-ProductionUpdater'; 'Accept' = 'application/vnd.github+json' }
-try {
-    $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/Eris92/Assets/releases/latest' -Headers $headers -TimeoutSec 30
-} catch {
-    throw "No public GitHub Release available. Check the CI release job and retry. $($_.Exception.Message)"
-}
 $tag = 'assets-' + $commit
-if ($release.tag_name -ne $tag -or $release.draft -or $release.prerelease) {
-    throw "Release $($release.tag_name) does not match main ($commit). Retry after CI release succeeds."
+$releaseUrl = 'https://api.github.com/repos/Eris92/Assets/releases/tags/' + $tag
+$release = $null
+# Use the exact commit-tagged release, never the global "latest" alias.
+# CI may finish shortly after git pull. Retry only missing releases, bounded.
+for ($attempt = 1; $attempt -le 6; $attempt++) {
+    try {
+        $release = Invoke-RestMethod -Uri $releaseUrl -Headers $headers -TimeoutSec 30 -ErrorAction Stop
+        break
+    } catch {
+        $response = $_.Exception.Response
+        $status = if ($null -ne $response) { [int]$response.StatusCode } else { 0 }
+        if ($status -ne 404) {
+            throw "GitHub release API failed (HTTP $status): $($_.Exception.Message)"
+        }
+        if ($attempt -eq 6) {
+            throw "Release $tag is not published. Check the CI release job; no IIS changes were made."
+        }
+        Write-Host "Release for $commit is not published yet ($attempt/6). Retrying..."
+        Start-Sleep -Seconds 10
+    }
+}
+if ($null -eq $release -or $release.tag_name -ne $tag -or
+    $release.draft -or $release.prerelease -or
+    $release.target_commitish -ne $commit) {
+    throw "Release metadata does not match commit $commit. No IIS changes were made."
 }
 $assets = @($release.assets)
 $zipName = 'AssetsPortal-win-x64.zip'
