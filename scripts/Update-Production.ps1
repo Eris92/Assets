@@ -35,8 +35,15 @@ if ($LASTEXITCODE -ne 0 -or -not ($runtimes -match '^Microsoft\.NETCore\.App 10\
     throw 'ASP.NET Core shared runtimes 10.x not found.'
 }
 Write-Host 'Pulling source...'
-& git -C $repoRoot pull --ff-only origin main
-if ($LASTEXITCODE -ne 0) { throw 'git pull failed. No IIS changes were made.' }
+# Windows PowerShell 5.1 converts native Git stderr (including normal fetch status)
+# into NativeCommandError when ErrorActionPreference is Stop. Run Git as a
+# separate process and check the real exit code instead.
+$gitExe = (Get-Command git.exe -ErrorAction Stop).Source
+$gitArgs = '-C "{0}" pull --ff-only origin main' -f $repoRoot
+$gitProcess = Start-Process -FilePath $gitExe -ArgumentList $gitArgs -NoNewWindow -Wait -PassThru
+if ($gitProcess.ExitCode -ne 0) {
+    throw "git pull failed with exit code $($gitProcess.ExitCode). No IIS changes were made."
+}
 $commit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'Invalid HEAD SHA.' }
 
