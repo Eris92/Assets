@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
@@ -20,7 +21,7 @@ Directory.CreateDirectory(dataDirectory);
 var keyDirectory = Path.Combine(dataDirectory, "keys");
 Directory.CreateDirectory(keyDirectory);
 builder.Services.AddDataProtection().SetApplicationName("Assets-WEB")
-    .PersistKeysToFileSystem(new DirectoryInfo(keyDirectory)).ProtectKeysWithDpapi();
+    .PersistKeysToFileSystem(new DirectoryInfo(keyDirectory)).ProtectKeysWithDpapi(protectToLocalMachine: true);
 builder.Services.AddAuthentication(IISDefaults.AuthenticationScheme);
 builder.Services.AddAuthorization();
 builder.Services.AddAntiforgery(o => o.HeaderName = "X-CSRF-TOKEN");
@@ -168,10 +169,42 @@ TeamMember[] ReportsTo(string login) {
 }
 bool OwnerMatches(string owner, string login) => owner.Split(',', StringSplitOptions.TrimEntries).Any(v =>
     v.Equals(login, StringComparison.OrdinalIgnoreCase) || v.Equals(login.Split('\\').Last(), StringComparison.OrdinalIgnoreCase));
-async Task<List<JsonNode>> QueryAssets() {
+
+// Match the Jira reference attribute by Email Address, as in the working deployment.
+// The email value must originate from the authenticated Windows identity, never a URL parameter.
+string OwnerEmail(ClaimsPrincipal user) {
+    var windowsName = user.Identity?.Name ?? throw new InvalidOperationException("Windows identity is missing");
+    var login = windowsName.Split('\\').Last();
+    string? domain = Setting("UserEmailDomain", "Jira:UserEmailDomain");
+    if (string.IsNullOrWhiteSpace(domain)) {
+        var serviceEmail = Setting("AccountEmail", "Jira:AccountEmail");
+        var at = serviceEmail?.LastIndexOf('@') ?? -1;
+        if (at >= 0) domain = serviceEmail![(at + 1)..];
+    }
+    if (login.Contains('@')) {
+        var parts = login.Split('@');
+        if (parts.Length != 2) throw new InvalidOperationException("Invalid Windows email identity");
+        domain = parts[1];
+        login = parts[0];
+    }
+    if (string.IsNullOrWhiteSpace(domain) || login.Length is < 1 or > 128 ||
+        !login.All(c => char.IsLetterOrDigit(c) || c is '.' or '_' or '-') ||
+        domain.Length > 253 || !domain.Contains('.') ||
+        !domain.All(c => char.IsLetterOrDigit(c) || c is '.' or '-'))
+        throw new InvalidOperationException("Cannot derive a safe owner email from the Windows identity and Jira UserEmailDomain");
+    return $"{login}@{domain}";
+}
+string OwnerAql(ClaimsPrincipal user) {
+    var baseAql = Setting("Aql", "Jira:Aql");
+    if (string.IsNullOrWhiteSpace(baseAql)) throw new InvalidOperationException("Jira AQL is not configured");
+    return $"({baseAql}) AND Osoba_odpowiedzialna.\"Email Address\" = \"{OwnerEmail(user)}\"";
+}
+async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
+    var aql = aqlOverride ?? Setting("Aql", "Jira:Aql");
+    if (string.IsNullOrWhiteSpace(aql)) throw new InvalidOperationException("Jira AQL is not configured");
     var entries = new List<JsonNode>();
     for (var page = 1; page <= 100; page++) {
-        var result = await Jira(HttpMethod.Post,  $"object/aql?startAt={entries.Count}&maxResults=100&includeAttributes=true", new { qlQuery = Setting("Aql", "Jira:Aql") });
+        var result = await Jira(HttpMethod.Post, $"object/aql?startAt={entries.Count}&maxResults=100&includeAttributes=true", new { qlQuery = aql });
         var batch = result["values"]?.AsArray() ?? result["objectEntries"]?.AsArray() ?? result["results"]?["objectEntries"]?.AsArray() ?? new JsonArray();
         entries.AddRange(batch.OfType<JsonNode>());
         var total = result["total"]?.GetValue<int>() ?? result["totalFilterCount"]?.GetValue<int>();
@@ -182,11 +215,19 @@ async Task<List<JsonNode>> QueryAssets() {
 
 app.MapGet("/api/me", (HttpContext ctx, IAntiforgery anti) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
-    var decision = access.Check(ctx.User);
-    var tokens = decision.Allowed ? anti.GetAndStoreTokens(ctx) : null;
-    return Results.Ok(new { name = ctx.User.Identity.Name, authenticationType = ctx.User.Identity.AuthenticationType,
-        allowed = decision.Allowed, accessReason = decision.Reason, bootstrap = decision.Bootstrap, manager = decision.Allowed && ReportsTo(ctx.User.Identity.Name!).Length > 0, admin = decision.Admin, adminGroup = Setting("AdminGroup", "Portal:AdminGroup"), csrf = tokens?.RequestToken,
-        allowedAttributes = AllowedAttributes() });
+    try {
+        var decision = access.Check(ctx.User);
+        var tokens = decision.Allowed ? anti.GetAndStoreTokens(ctx) : null;
+        return Results.Ok(new { name = ctx.User.Identity.Name, authenticationType = ctx.User.Identity.AuthenticationType,
+            allowed = decision.Allowed, accessReason = decision.Reason, bootstrap = decision.Bootstrap, manager = decision.Allowed && ReportsTo(ctx.User.Identity.Name!).Length > 0, admin = decision.Admin, adminGroup = Setting("AdminGroup", "Portal:AdminGroup"), csrf = tokens?.RequestToken,
+            allowedAttributes = AllowedAttributes() });
+    } catch (CryptographicException ex) {
+        app.Logger.LogError(ex, "Unable to create /api/me antiforgery token. Verify Assets DPAPI key ring and IIS AppPool identity");
+        return Results.Problem("Assets antiforgery key ring is unavailable. Check the application error logs.", statusCode: 503);
+    } catch (Exception ex) {
+        app.Logger.LogError(ex, "/api/me failed. Check SQLite permissions, team.json and Windows identity");
+        return Results.Problem("Unable to read the authenticated Assets account. Check the application error logs.", statusCode: 500);
+    }
 });
 
 app.MapGet("/api/admin/access", (HttpContext ctx) => {
@@ -295,9 +336,10 @@ app.MapGet("/api/assets", async (HttpContext ctx) => {
     try {
         var ownerId = Setting("OwnerAttributeId", "Jira:OwnerAttributeId");
         if (string.IsNullOrWhiteSpace(ownerId)) return Results.Problem("Configure Jira OwnerAttributeId", statusCode: 503);
-        var entries = await QueryAssets();
-        var mine = entries.Where(o => OwnerMatches(AttributeValue(Attribute(o, ownerId)), ctx.User.Identity.Name!));
-        return Results.Ok(mine.Select(o => ProjectObject(o!)));
+        // Jira reference owner values are not Windows logins. Use Jira's
+        // validated Email Address reference query, like the working build.
+        var entries = await QueryAssets(OwnerAql(ctx.User));
+        return Results.Ok(entries.Select(o => ProjectObject(o!)));
     } catch (Exception ex) { app.Logger.LogError(ex, "Asset query failed"); return Results.Problem("Nie udalo sie pobrac danych Jira.", statusCode: 502); }
 });
 
@@ -336,6 +378,12 @@ app.MapPost("/api/reports", async (HttpContext ctx, IAntiforgery anti, ReportInp
         if (!long.TryParse(ownerId, out _)) return Results.Problem("Configure Jira OwnerAttributeId", statusCode: 503);
         var owner = AttributeValue(Attribute(obj, ownerId));
         var own = OwnerMatches(owner, ctx.User.Identity.Name!);
+        if (!own) {
+            // Server-side Jira AQL is authoritative when the owner is an Assets
+            // object reference rather than a plain Windows login string.
+            var ownedObjects = await QueryAssets(OwnerAql(ctx.User));
+            own = ownedObjects.Any(o => o["id"]?.ToString() == input.ObjectId);
+        }
         var employees = own ? Array.Empty<TeamMember>() : ReportsTo(ctx.User.Identity.Name!).Where(p => OwnerMatches(owner, p.Login)).ToArray();
         if (!own && employees.Length != 1) return Results.Forbid();
         if (type == "not-held" && !own || (type is "employee-left" or "assignment") && (own || employees.Length != 1)) return Results.Forbid();

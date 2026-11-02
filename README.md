@@ -1,5 +1,14 @@
 # Assets Portal
 
+## Windows identity, DPAPI, and Jira owner matching
+
+The working 7z package used a Jira AQL reference constraint on `Osoba_odpowiedzialna."Email Address"`. The new `/api/assets` endpoint reconstructs that constraint from the **authenticated Windows login** and `Jira:UserEmailDomain`. When `UserEmailDomain` is absent, it falls back to the domain part of the configured Jira account email. A Windows identity containing a complete UPN uses its own domain. The principal is never taken from an untrusted URL or request body. Login/derived email must pass strict validation before inclusion in AQL.
+
+The previously added raw `OwnerAttributeId` value comparison remains for compatibility; creating reports for assets owned through a Jira reference checks the server-side AQL ownership query. Team hierarchy stays separately controlled by `team.json`.
+
+The isolated `C:\ProgramData\Assets\Data\keys` key ring is now encrypted with **machine-scope Windows DPAPI**, rather than user-scope DPAPI, because the IIS application-pool token may not have a loaded user profile. This relies on the strict NTFS ACL configured by the production updater. Do not copy keys from a different application. Pre-existing user-scoped keys may still need authorized recovery under their original identity; do not delete existing keys without a backup and an inventory of encrypted settings. A failing `/api/me` returns a server error; `401` is authentication and `403` means access denied by the portal policy.
+
+
 ## Separate Assets configuration and first deployment
 
 This repository (`Eris92/Assets`) is **not** the separate site at `C:\Sites\AssetsPortal`. Never copy configuration, databases, or DPAPI keys from that other project.
