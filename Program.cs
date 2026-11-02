@@ -181,6 +181,11 @@ string OwnerEmail(ClaimsPrincipal user) {
         var at = serviceEmail?.LastIndexOf('@') ?? -1;
         if (at >= 0) domain = serviceEmail![(at + 1)..];
     }
+    if (string.IsNullOrWhiteSpace(domain)) {
+        // Legacy Jira:BaseUrl + Jira:Token config has no service account email.
+        // Use the server's AD DNS suffix; an explicit UserEmailDomain overrides it.
+        domain = System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().DomainName;
+    }
     if (login.Contains('@')) {
         var parts = login.Split('@');
         if (parts.Length != 2) throw new InvalidOperationException("Invalid Windows email identity");

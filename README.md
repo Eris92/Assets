@@ -2,7 +2,7 @@
 
 ## Windows identity, DPAPI, and Jira owner matching
 
-The working 7z package used a Jira AQL reference constraint on `Osoba_odpowiedzialna."Email Address"`. The new `/api/assets` endpoint reconstructs that constraint from the **authenticated Windows login** and `Jira:UserEmailDomain`. When `UserEmailDomain` is absent, it falls back to the domain part of the configured Jira account email. A Windows identity containing a complete UPN uses its own domain. The principal is never taken from an untrusted URL or request body. Login/derived email must pass strict validation before inclusion in AQL.
+The working 7z package used a Jira AQL reference constraint on `Osoba_odpowiedzialna."Email Address"`. The new `/api/assets` endpoint reconstructs that constraint from the **authenticated Windows login** and `Jira:UserEmailDomain`. When `UserEmailDomain` is absent, it falls back to the domain part of the configured Jira account email, then to the Windows server's AD DNS domain if the older Jira:BaseUrl/Token configuration is used. A Windows identity containing a complete UPN uses its own domain. The principal is never taken from an untrusted URL or request body. Login/derived email must pass strict validation before inclusion in AQL.
 
 The previously added raw `OwnerAttributeId` value comparison remains for compatibility; creating reports for assets owned through a Jira reference checks the server-side AQL ownership query. Team hierarchy stays separately controlled by `team.json`.
 
