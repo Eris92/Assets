@@ -166,6 +166,7 @@ $configTemplate = Join-Path $repoRoot 'appsettings.org.json'
 # Configuration, SQLite and DPAPI keys belong only to Eris92/Assets.
 # Do not import settings from a different IIS project or application.
 $configSource = $null
+$rewriteLegacyDbPath = $false
 if (Test-Path -LiteralPath $newConfig -PathType Leaf) {
     # Never silently replace an established production configuration.
     $configSource = $newConfig
@@ -185,7 +186,11 @@ if (Test-Path -LiteralPath $newConfig -PathType Leaf) {
             if ($legacyDbFull.StartsWith($dataPath.TrimEnd($separator) + $separator, [StringComparison]::OrdinalIgnoreCase)) {
                 $configSource = $legacyAssetsConfig
             } else {
-                Write-Warning "Ignoring checkout appsettings.json: its DatabasePath is outside the Assets data directory. The original file was not modified."
+                # Keep Jira settings from the Assets checkout, but never use
+                # its obsolete database path pointing to another application.
+                $configSource = $legacyAssetsConfig
+                $rewriteLegacyDbPath = $true
+                Write-Warning "Checkout config has an external DatabasePath. Only the database path will be replaced in the new Assets config; the original file remains unchanged."
             }
         }
     } catch {
@@ -204,7 +209,12 @@ try {
         throw 'Missing Jira or Portal section.'
     }
     $dbConfig = [string]$cfg.Portal.DatabasePath
-    if (-not [string]::IsNullOrWhiteSpace($dbConfig)) {
+    if ($rewriteLegacyDbPath) {
+        if ($configSource -ne $legacyAssetsConfig -or (Test-Path -LiteralPath $newConfig -PathType Leaf)) {
+            throw 'Unsafe configuration migration state.'
+        }
+        $cfg.Portal.DatabasePath = Join-Path $dataDirectory 'portal.db'
+    } elseif (-not [string]::IsNullOrWhiteSpace($dbConfig)) {
         $dbFull = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($dbConfig))
         if (-not $dbFull.StartsWith($dataPath.TrimEnd($separator) + $separator, [StringComparison]::OrdinalIgnoreCase)) {
             throw "Portal:DatabasePath must be inside $dataPath, not $dbFull."
@@ -279,8 +289,16 @@ try {
             Write-Host "Initialized separate Assets settings at $newConfig. Configure Jira using the web admin panel."
         } else {
             New-Item -Path $dataPath -ItemType Directory -Force | Out-Null
-            Copy-Item -LiteralPath $configSource -Destination $newConfig -ErrorAction Stop
-            Write-Host "Migrated Assets settings from Git checkout into $newConfig."
+            if ($rewriteLegacyDbPath) {
+                # Migrate the local Assets Jira settings, not the foreign DB/keys.
+                $sanitizedJson = $cfg | ConvertTo-Json -Depth 80
+                [IO.File]::WriteAllText($newConfig, $sanitizedJson, (New-Object Text.UTF8Encoding($false)))
+                Write-Host "Migrated local Assets settings with an isolated database: $newConfig"
+            } else {
+                Copy-Item -LiteralPath $configSource -Destination $newConfig -ErrorAction Stop
+                Write-Host "Migrated Assets settings from Git checkout into $newConfig."
+            }
+            & (Join-Path $repoRoot 'scripts\Initialize-PortalAdmin.ps1') -Account ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
         }
     }
     New-Item -Path $dataDirectory -ItemType Directory -Force | Out-Null
