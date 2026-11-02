@@ -2,6 +2,7 @@
 param(
     [string]$SiteName = 'Assets-KL',
     [string]$DeployRoot = 'C:\Sites\AssetsDeploy',
+    [string]$ConfigSourcePath,
     [string]$HealthUrl
 )
 
@@ -34,6 +35,38 @@ if ($LASTEXITCODE -ne 0 -or -not ($runtimes -match '^Microsoft\.NETCore\.App 10\
     -not ($runtimes -match '^Microsoft\.AspNetCore\.App 10\.')) {
     throw 'ASP.NET Core shared runtimes 10.x not found.'
 }
+# IIS operations are asynchronous; do not start a pool while it is Stopping.
+function Wait-AppPoolState {
+    param([string]$Name, [string]$Expected, [int]$Attempts = 60)
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        try {
+            $state = [string](Get-WebAppPoolState -Name $Name -ErrorAction Stop).Value
+            if ($state -eq $Expected) { return }
+        } catch {
+            Write-Verbose "Reading app pool state: $($_.Exception.Message)"
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "App pool $Name did not reach state $Expected."
+}
+function Start-AppPoolSafely {
+    param([string]$Name, [int]$Attempts = 40)
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        try {
+            $state = [string](Get-WebAppPoolState -Name $Name -ErrorAction Stop).Value
+            if ($state -eq 'Started') { return }
+            if ($state -eq 'Stopped') {
+                Start-WebAppPool -Name $Name -ErrorAction Stop
+            }
+        } catch {
+            # WAS often returns 0x80070425 while a previous stop is completing.
+            Write-Verbose "App pool start attempt $($attempt + 1): $($_.Exception.Message)"
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "App pool $Name could not start. Check WAS/W3SVC services and IIS event logs."
+}
+
 Write-Host 'Pulling source...'
 # Windows PowerShell 5.1 converts native Git stderr (including normal fetch status)
 # into NativeCommandError when ErrorActionPreference is Stop. Run Git as a
@@ -74,7 +107,13 @@ if ($oldPath.TrimEnd($separator).Equals($newPath.TrimEnd($separator), [StringCom
     Write-Host "Already active: $commit"
     return
 }
-if (Test-Path -LiteralPath $newPath) { throw "Release directory already exists and is not active: $newPath" }
+if (Test-Path -LiteralPath $newPath) {
+    # An earlier interrupted deployment may have left an unused release dir.
+    # Move it aside instead of silently deleting or trusting stale files.
+    $recovered = $newPath + '.interrupted-' + (Get-Date -Format 'yyyyMMddHHmmssfff')
+    Rename-Item -LiteralPath $newPath -NewName (Split-Path $recovered -Leaf) -ErrorAction Stop
+    Write-Warning "Previous staged directory was preserved at: $recovered"
+}
 
 $temp = Join-Path $env:TEMP ('AssetsPortal_' + [guid]::NewGuid().ToString('N'))
 $backupRoot = Join-Path $env:ProgramData 'AssetsPortal-Deploy\Backups'
@@ -83,6 +122,32 @@ $backupDir = Join-Path $backupRoot $backupName
 $dataPath = Join-Path $env:ProgramData 'AssetsPortal'
 $liveConfig = Join-Path $oldPath 'appsettings.json'
 $newConfig = Join-Path $dataPath 'appsettings.json'
+# Never switch IIS to a package without the existing production Jira settings.
+# The earlier manual deployment used C:\Sites\AssetsPortal while IIS pointed at C:\Sites\Assets.
+$configCandidates = @()
+if (-not [string]::IsNullOrWhiteSpace($ConfigSourcePath)) {
+    $configCandidates += [IO.Path]::GetFullPath($ConfigSourcePath)
+}
+$configCandidates += $liveConfig
+$configCandidates += 'C:\Sites\AssetsPortal\appsettings.json'
+$configSource = $null
+if (-not (Test-Path -LiteralPath $newConfig -PathType Leaf)) {
+    $configSource = @($configCandidates | Select-Object -Unique | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+    if ($configSource.Count -eq 0) {
+        throw "Production configuration missing. Restore C:\ProgramData\AssetsPortal\appsettings.json or pass -ConfigSourcePath 'C:\path\appsettings.json'. IIS was not changed."
+    }
+    $configSource = [string]$configSource[0]
+} else {
+    $configSource = $newConfig
+}
+try {
+    $cfg = Get-Content -LiteralPath $configSource -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $cfg.Jira -or $null -eq $cfg.Portal) {
+        throw 'Missing Jira or Portal section.'
+    }
+} catch {
+    throw "Invalid JSON configuration at $configSource. IIS was not changed. $($_.Exception.Message)"
+}
 $poolWasStarted = (Get-WebAppPoolState -Name $poolName).Value -eq 'Started'
 $stopped = $false
 $changed = $false
@@ -132,29 +197,27 @@ try {
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $backupDir 'deployment.json') -Encoding UTF8
 
     if ($poolWasStarted) {
-        Stop-WebAppPool -Name $poolName
         $stopped = $true
+        $state = [string](Get-WebAppPoolState -Name $poolName).Value
+        if ($state -eq 'Started') { Stop-WebAppPool -Name $poolName -ErrorAction Stop }
+        Wait-AppPoolState -Name $poolName -Expected 'Stopped'
     }
     if (Test-Path -LiteralPath $dataPath) {
         Copy-Item -LiteralPath $dataPath -Destination (Join-Path $backupDir 'AssetsPortalData') -Recurse -Force
     }
-    if (Test-Path -LiteralPath $liveConfig -PathType Leaf) {
-        Copy-Item -LiteralPath $liveConfig -Destination (Join-Path $backupDir 'previous-appsettings.json')
-    }
-    if (-not (Test-Path -LiteralPath $newConfig) -and (Test-Path -LiteralPath $liveConfig -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $newConfig -PathType Leaf)) {
+        Copy-Item -LiteralPath $configSource -Destination (Join-Path $backupDir 'previous-appsettings.json') -Force
         New-Item -Path $dataPath -ItemType Directory -Force | Out-Null
-        Copy-Item -LiteralPath $liveConfig -Destination $newConfig
-        Write-Host 'Migrated existing appsettings.json into ProgramData.'
-    }
-    if (-not (Test-Path -LiteralPath $newConfig)) {
-        Write-Warning 'Production appsettings.json missing. Configure Jira and a bootstrap admin before use.'
+        Copy-Item -LiteralPath $configSource -Destination $newConfig -ErrorAction Stop
+        Write-Host "Preserved production configuration from $configSource in ProgramData."
     }
     Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Location $SiteName -Filter $winFilter -Name enabled -Value $true
     $changed = $true
     Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Location $SiteName -Filter $anonFilter -Name enabled -Value $false
     Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter $pathFilter -Name physicalPath -Value $newPath
     if ($poolWasStarted) {
-        Start-WebAppPool -Name $poolName
+        Start-AppPoolSafely -Name $poolName
+        Wait-AppPoolState -Name $poolName -Expected 'Started'
         $stopped = $false
     }
     $actualPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string](Get-Website -Name $SiteName).PhysicalPath))
@@ -186,7 +249,11 @@ try {
         } catch { Write-Warning "IIS rollback failed: $($_.Exception.Message)" }
     }
     if ($stopped -and $poolWasStarted) {
-        try { Start-WebAppPool -Name $poolName } catch { Write-Warning "App pool start failed: $($_.Exception.Message)" }
+        try {
+            Start-AppPoolSafely -Name $poolName
+        } catch {
+            Write-Warning "App pool start failed during rollback: $($_.Exception.Message)"
+        }
     }
     throw $failure
 } finally {
