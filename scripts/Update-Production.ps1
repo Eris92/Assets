@@ -49,6 +49,22 @@ function Wait-AppPoolState {
     }
     throw "App pool $Name did not reach state $Expected."
 }
+function Stop-AppPoolSafely {
+    param([string]$Name, [int]$Attempts = 40)
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        try {
+            $state = [string](Get-WebAppPoolState -Name $Name -ErrorAction Stop).Value
+            if ($state -eq 'Stopped') { return }
+            if ($state -eq 'Started') {
+                Stop-WebAppPool -Name $Name -ErrorAction Stop
+            }
+        } catch {
+            Write-Verbose "App pool stop attempt $($attempt + 1): $($_.Exception.Message)"
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "App pool $Name could not stop. Check WAS/W3SVC services and IIS event logs."
+}
 function Start-AppPoolSafely {
     param([string]$Name, [int]$Attempts = 40)
     for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
@@ -196,12 +212,10 @@ try {
         AnonymousAuthentication = $oldAnonymous
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $backupDir 'deployment.json') -Encoding UTF8
 
-    if ($poolWasStarted) {
-        $stopped = $true
-        $state = [string](Get-WebAppPoolState -Name $poolName).Value
-        if ($state -eq 'Started') { Stop-WebAppPool -Name $poolName -ErrorAction Stop }
-        Wait-AppPoolState -Name $poolName -Expected 'Stopped'
-    }
+    # Quiesce IIS before backing up SQLite, even if the pool is Starting/Stopping.
+    $stopped = $true
+    Stop-AppPoolSafely -Name $poolName
+    Wait-AppPoolState -Name $poolName -Expected 'Stopped'
     if (Test-Path -LiteralPath $dataPath) {
         Copy-Item -LiteralPath $dataPath -Destination (Join-Path $backupDir 'AssetsPortalData') -Recurse -Force
     }
@@ -215,14 +229,14 @@ try {
     $changed = $true
     Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Location $SiteName -Filter $anonFilter -Name enabled -Value $false
     Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter $pathFilter -Name physicalPath -Value $newPath
-    if ($poolWasStarted) {
-        Start-AppPoolSafely -Name $poolName
-        Wait-AppPoolState -Name $poolName -Expected 'Started'
-        $stopped = $false
-    }
+    # Explicit deployment requests the application to be online even when a
+    # previous failed deployment left its app pool stopped.
+    Start-AppPoolSafely -Name $poolName
+    Wait-AppPoolState -Name $poolName -Expected 'Started'
+    $stopped = $false
     $actualPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string](Get-Website -Name $SiteName).PhysicalPath))
     if (-not $actualPath.Equals($newPath, [StringComparison]::OrdinalIgnoreCase)) { throw 'IIS PhysicalPath verification failed.' }
-    if ($poolWasStarted -and (Get-WebAppPoolState -Name $poolName).Value -ne 'Started') {
+    if ((Get-WebAppPoolState -Name $poolName).Value -ne 'Started') {
         throw 'Application pool did not start.'
     }
     if ($HealthUrl) {
@@ -233,7 +247,7 @@ try {
     Write-Host "IIS $SiteName PhysicalPath: $newPath"
     Write-Host "Backup: $backupDir"
     Write-Host 'Check /api/me and /api/assets using your Windows account.'
-    if (-not $poolWasStarted) { Write-Warning "App pool $poolName was already stopped and remains stopped." }
+    if (-not $poolWasStarted) { Write-Host "App pool $poolName recovered from its previously stopped state." }
 } catch {
     $failure = $_
     if ($changed) {
