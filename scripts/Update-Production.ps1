@@ -239,10 +239,12 @@ try {
     New-Item -Path $dataDirectory -ItemType Directory -Force | Out-Null
     # Keep the config file read-only for IIS. DB and DP keys are under Data.
     $poolSid = "IIS AppPool\$poolName"
-    & icacls.exe $dataPath '/grant' ($poolSid + ':(OI)(CI)RX') | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Unable to grant read access for $poolSid on Assets settings." }
-    & icacls.exe $dataDirectory '/grant' ($poolSid + ':(OI)(CI)M') | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Unable to grant write access for $poolSid on Assets database and DP keys." }
+    # Remove inherited Users permissions from the directory containing Jira credentials.
+    # The app pool gets read-only access to configuration and Modify only for Data.
+    & icacls.exe $dataPath '/inheritance:r' '/grant:r' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' ($poolSid + ':(OI)(CI)RX') | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Unable to secure the Assets configuration directory." }
+    & icacls.exe $dataDirectory '/inheritance:r' '/grant:r' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' ($poolSid + ':(OI)(CI)M') | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Unable to secure the Assets SQLite and DP keys directory." }
     Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Location $SiteName -Filter $winFilter -Name enabled -Value $true
     $changed = $true
     Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Location $SiteName -Filter $anonFilter -Name enabled -Value $false
