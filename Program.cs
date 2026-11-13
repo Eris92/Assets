@@ -84,6 +84,7 @@ using (var db = new SqliteConnection(ConnectionString())) {
 
 var audit = new OperationalAudit(ConnectionString(), app.Logger);
 audit.Initialize();
+var deployments = new DeploymentCoordinator(dataDirectory, app.Environment.ContentRootPath);
 // Server-side events are authoritative; browser clicks are separate, untrusted telemetry.
 app.Use(async (ctx, next) => {
     if (!ctx.Request.Path.StartsWithSegments("/api")) { await next(ctx); return; }
@@ -440,6 +441,22 @@ app.MapGet("/api/admin/jira/workspaces", async (HttpContext ctx) => {
     }
 });
 
+app.MapGet("/api/admin/deployment", (HttpContext ctx) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    return Results.Ok(deployments.Status());
+});
+
+app.MapPost("/api/admin/deployment", async (HttpContext ctx, IAntiforgery anti, DeploymentInput input) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    var result = deployments.Enqueue(input.Action ?? "", ctx.User.Identity?.Name ?? "");
+    audit.Write(ctx.User.Identity?.Name ?? "Unknown", "Server", "Deployment." + input.Action,
+        "Assets-KL", result.Accepted ? "Queued" : "Rejected", ctx.Connection.RemoteIpAddress?.ToString(),
+        ctx.TraceIdentifier, result.Accepted ? 202 : 409);
+    if (!result.Accepted) return Results.Conflict(new { error = result.Message });
+    return Results.Accepted("/api/admin/deployment", new { id = result.RequestId, status = "Queued" });
+});
+
 // UI clicks are best-effort client telemetry: never record typed values or secrets.
 // Privileged actions remain auditable via server-side HTTP/decision events.
 app.MapPost("/api/audit/click", async (HttpContext ctx, IAntiforgery anti, ClickInput input) => {
@@ -714,6 +731,7 @@ app.MapPost("/api/reports/{id:long}/decision", async (HttpContext ctx, IAntiforg
 
 app.Run();
 
+record DeploymentInput(string? Action);
 record ClickInput(string Target, string? View);
 record ReportInput(string ObjectId, string? AttributeId, string? ProposedValue, string? Reason, string? Type = null);
 record TeamMember(string Login, string Name, string Manager, string? Role = null);
