@@ -60,6 +60,16 @@ using (var db = new SqliteConnection(ConnectionString())) {
           Status TEXT NOT NULL, DecidedBy TEXT, DecidedAt TEXT, Error TEXT
         );
         CREATE TABLE IF NOT EXISTS Settings (Key TEXT PRIMARY KEY, Value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS HandoverProtocols (
+          Id INTEGER PRIMARY KEY AUTOINCREMENT, Mode TEXT NOT NULL,
+          SourceLogin TEXT NOT NULL, SourceName TEXT NOT NULL,
+          TargetLogin TEXT NOT NULL, TargetName TEXT NOT NULL,
+          ItemsJson TEXT NOT NULL, Notes TEXT NOT NULL,
+          CreatedAt TEXT NOT NULL, CreatedBy TEXT NOT NULL,
+          Status TEXT NOT NULL DEFAULT 'AwaitingSignatures',
+          CompletedAt TEXT, CompletedBy TEXT
+        );
+        CREATE INDEX IF NOT EXISTS IX_HandoverProtocols_CreatedAt ON HandoverProtocols(CreatedAt);
         """;
     cmd.ExecuteNonQuery();
     foreach (var column in new[] {
@@ -129,6 +139,21 @@ string[] AllowedAttributes() {
     return stored.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 }
 bool IsAdmin(ClaimsPrincipal user) => access.Check(user).Admin;
+bool CanHandover(ClaimsPrincipal user) {
+    if (user.Identity is not WindowsIdentity identity || !access.Check(user).Allowed) return false;
+    if (IsAdmin(user)) return true;
+    var configured = Setting("HandoverGroup", "Portal:HandoverGroup");
+    if (string.IsNullOrWhiteSpace(configured)) return false;
+    try {
+        var sid = configured.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)
+            ? new SecurityIdentifier(configured)
+            : (SecurityIdentifier)new NTAccount(configured).Translate(typeof(SecurityIdentifier));
+        return new WindowsPrincipal(identity).IsInRole(sid);
+    } catch (Exception ex) when (ex is IdentityNotMappedException or ArgumentException) {
+        app.Logger.LogWarning("Handover AD group is not resolvable");
+        return false;
+    }
+}
 IResult AuthError(HttpContext ctx) => ctx.User.Identity?.IsAuthenticated == true ? Results.Forbid() : Results.Unauthorized();
 bool IsValidText(string? s, int max) => !string.IsNullOrWhiteSpace(s) && s.Length <= max;
 string? JiraBase() {
@@ -240,9 +265,7 @@ string OwnerEmail(ClaimsPrincipal user) {
     return $"{login}@{domain}";
 }
 string OwnerAql(ClaimsPrincipal user) {
-    var baseAql = Setting("Aql", "Jira:Aql");
-    if (string.IsNullOrWhiteSpace(baseAql)) throw new InvalidOperationException("Jira AQL is not configured");
-    return $"({baseAql}) AND Osoba_odpowiedzialna.\"Email Address\" = \"{OwnerEmail(user)}\"";
+    return $"Osoba_odpowiedzialna.\"Email Address\" = \"{OwnerEmail(user)}\"";
 }
 async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
     var aql = aqlOverride ?? Setting("Aql", "Jira:Aql");
@@ -283,7 +306,7 @@ app.MapGet("/api/me", (HttpContext ctx, IAntiforgery anti) => {
         var decision = access.Check(ctx.User);
         var tokens = decision.Allowed ? anti.GetAndStoreTokens(ctx) : null;
         return Results.Ok(new { name = ctx.User.Identity.Name, authenticationType = ctx.User.Identity.AuthenticationType,
-            allowed = decision.Allowed, accessReason = decision.Reason, bootstrap = decision.Bootstrap, manager = decision.Allowed && ReportsTo(ctx.User.Identity.Name!).Length > 0, admin = decision.Admin, adminGroup = Setting("AdminGroup", "Portal:AdminGroup"), csrf = tokens?.RequestToken,
+            allowed = decision.Allowed, accessReason = decision.Reason, bootstrap = decision.Bootstrap, manager = decision.Allowed && ReportsTo(ctx.User.Identity.Name!).Length > 0, admin = decision.Admin, handover = decision.Allowed && CanHandover(ctx.User), adminGroup = Setting("AdminGroup", "Portal:AdminGroup"), csrf = tokens?.RequestToken,
             allowedAttributes = AllowedAttributes() });
     } catch (CryptographicException ex) {
         app.Logger.LogError(ex, "Unable to create /api/me antiforgery token. Verify Assets DPAPI key ring and IIS AppPool identity");
@@ -332,6 +355,7 @@ app.MapGet("/api/admin/settings", (HttpContext ctx) => {
         cloudId = Setting("CloudId", "Jira:CloudId"), workspaceId = Setting("WorkspaceId", "Jira:WorkspaceId"),
         aql = Setting("Aql", "Jira:Aql"), ownerAttributeId = Setting("OwnerAttributeId", "Jira:OwnerAttributeId"),
         allowedCorrectionAttributeIds = AllowedAttributes(), adminGroup = Setting("AdminGroup", "Portal:AdminGroup"),
+        handoverGroup = Setting("HandoverGroup", "Portal:HandoverGroup") ?? "",
         tokenConfigured = !string.IsNullOrWhiteSpace(JiraToken())
     });
 });
@@ -347,7 +371,8 @@ app.MapPost("/api/admin/settings", async (HttpContext ctx, IAntiforgery anti, Se
         !long.TryParse(input.OwnerAttributeId, out _) || !IsValidText(input.AdminGroup, 256) ||
         input.AllowedCorrectionAttributeIds is null || input.AllowedCorrectionAttributeIds.Length > 50 ||
         input.AllowedCorrectionAttributeIds.Any(id => !long.TryParse(id, out _)) ||
-        input.ApiToken?.Length > 1000) return Results.BadRequest(new { error = "Invalid settings" });
+        input.ApiToken?.Length > 1000 || (input.HandoverGroup?.Length ?? 0) > 256)
+        return Results.BadRequest(new { error = "Invalid settings" });
     try {
         var group = input.AdminGroup.Trim();
         if (!group.Equals(Setting("AdminGroup", "Portal:AdminGroup"), StringComparison.OrdinalIgnoreCase)) {
@@ -371,6 +396,14 @@ app.MapPost("/api/admin/settings", async (HttpContext ctx, IAntiforgery anti, Se
         Save("OwnerAttributeId", input.OwnerAttributeId.Trim());
         Save("AllowedCorrectionAttributeIds", string.Join(',', input.AllowedCorrectionAttributeIds.Distinct()));
         Save("AdminGroup", group);
+        if (!string.IsNullOrWhiteSpace(input.HandoverGroup)) {
+            var handoverGroup = input.HandoverGroup.Trim();
+            // Validate the delegated AD group at configuration time.
+            _ = handoverGroup.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)
+                ? new SecurityIdentifier(handoverGroup)
+                : (SecurityIdentifier)new NTAccount(handoverGroup).Translate(typeof(SecurityIdentifier));
+        }
+        Save("HandoverGroup", input.HandoverGroup?.Trim() ?? "");
         if (!string.IsNullOrWhiteSpace(input.ApiToken)) Save("ApiToken", app.Services.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("JiraApiToken.v1").Protect(input.ApiToken.Trim()));
         transaction.Commit();
@@ -513,7 +546,7 @@ app.MapGet("/api/team", async (HttpContext ctx) => {
         if (people.Length == 0) return Results.Ok(new { people = Array.Empty<object>(), equipment = Array.Empty<object>() });
         var ownerId = Setting("OwnerAttributeId", "Jira:OwnerAttributeId");
         if (string.IsNullOrWhiteSpace(ownerId)) return Results.Problem("Configure Jira OwnerAttributeId", statusCode: 503);
-        var objects = await QueryAssets();
+        var objects = await QueryAssets("objectId > 0");
         var equipment = new List<object>();
         foreach (var obj in objects) {
             var owners = people.Where(p => OwnerMatches(AttributeValue(Attribute(obj, ownerId)), p.Login)).ToArray();
@@ -737,4 +770,6 @@ record ReportInput(string ObjectId, string? AttributeId, string? ProposedValue, 
 record TeamMember(string Login, string Name, string Manager, string? Role = null);
 record DecisionInput(string Action);
 record SettingsInput(string SiteUrl, string AccountEmail, string CloudId, string? WorkspaceId, string Aql,
-    string OwnerAttributeId, string[] AllowedCorrectionAttributeIds, string AdminGroup, string? ApiToken);
+    string OwnerAttributeId, string[] AllowedCorrectionAttributeIds, string AdminGroup, string? ApiToken,
+    string? HandoverGroup = null);
+record HandoverProtocolInput(string Mode, string? SourceLogin, string? TargetLogin, string[] AssetIds, string? Notes);
