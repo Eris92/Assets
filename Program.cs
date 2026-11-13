@@ -1143,6 +1143,23 @@ app.MapGet("/api/team/delegations", (HttpContext ctx) => {
         grantedToMe = delegations.ByDelegate(ctx.User.Identity.Name!)
     });
 });
+app.MapGet("/api/team/delegates/search", async (HttpContext ctx,string? q) => {
+    if(ctx.User.Identity?.IsAuthenticated!=true)return Results.Unauthorized();
+    if(ReportsTo(ctx.User.Identity.Name!).Length==0)return Results.Forbid();
+    if(q is null || q.Trim().Length is <2 or >80)
+        return Results.BadRequest(new{error="Enter at least 2 characters"});
+    try {
+        var people=await Task.Run(()=>HandoverDirectory.Search(q),ctx.RequestAborted);
+        return Results.Ok(people.Select(p=>new {
+            login=ctx.User.Identity.Name!.Split('\\')[0]+"\\"+p.Login,
+            p.Name,p.Department,p.Email
+        }));
+    } catch(Exception ex) {
+        app.Logger.LogError(ex,"Team delegate user search failed");
+        return Results.Problem("Nie mozna przeszukac AD.",statusCode:502);
+    }
+}).RequireRateLimiting("handoverSearch");
+
 app.MapPost("/api/team/delegations", async (HttpContext ctx, IAntiforgery anti, DelegateInput input) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     await anti.ValidateRequestAsync(ctx);
@@ -1150,6 +1167,10 @@ app.MapPost("/api/team/delegations", async (HttpContext ctx, IAntiforgery anti, 
     if (ReportsTo(actor).Length==0) return Results.Forbid();
     if (string.IsNullOrWhiteSpace(input.Login) || input.Login.Length>128)
         return Results.BadRequest(new{error="Invalid substitute login"});
+    var actorDomain=actor.Contains('\\')?actor.Split('\\')[0]:"";
+    if(input.Login.Contains('\\') &&
+       !input.Login.StartsWith(actorDomain+"\\",StringComparison.OrdinalIgnoreCase))
+        return Results.BadRequest(new{error="Only delegates from the same AD domain are supported"});
     try {
         var substitute=await Task.Run(()=>HandoverDirectory.Resolve(input.Login),ctx.RequestAborted);
         var domain=actor.Contains('\\')?actor.Split('\\')[0]:"";

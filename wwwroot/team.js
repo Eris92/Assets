@@ -76,6 +76,20 @@ $('teamAssets').addEventListener('click',e=>{
  const owner=asset&&teamPeople.find(p=>p.id===asset.owner);
  if(owner)openEquipmentReport(asset,owner.name);
 });
+let delegateLookupTimer=null;
+$('delegateLogin').addEventListener('input',e=>{
+ const query=e.target.value.trim();
+ clearTimeout(delegateLookupTimer);
+ if(query.length<2)return;
+ delegateLookupTimer=setTimeout(async()=>{
+  try {
+   const rows=await api('/api/team/delegates/search?q='+encodeURIComponent(query));
+   if($('delegateLogin').value.trim()!==query)return;
+   $('delegateSuggestions').innerHTML=rows.map(x=>'<option value="'+escapeHtml(x.login)+'" label="'+
+     escapeHtml(x.Name||x.name)+'"></option>').join('');
+  }catch(ex){/* search is optional; submit still validates through AD */}
+ },450);
+});
 $('delegateForm').addEventListener('submit',async e=>{
  e.preventDefault();
  const value=$('delegateLogin').value.trim();
