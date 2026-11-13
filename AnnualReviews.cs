@@ -37,6 +37,7 @@ internal sealed class AnnualReviewStore {
               ReviewId INTEGER NOT NULL, DaysBefore INTEGER NOT NULL,
               Channel TEXT NOT NULL, Status TEXT NOT NULL DEFAULT 'Pending',
               AttemptedAt TEXT NOT NULL DEFAULT '',
+              AttemptCount INTEGER NOT NULL DEFAULT 0,
               DeliveredAt TEXT NOT NULL DEFAULT '',
               Error TEXT NOT NULL DEFAULT '',
               UNIQUE(ReviewId,DaysBefore,Channel));
@@ -47,6 +48,13 @@ internal sealed class AnnualReviewStore {
         if(probe.ExecuteScalar() is null){
             using var migrate=db.CreateCommand();
             migrate.CommandText="ALTER TABLE AnnualReviews ADD COLUMN SnapshotJson TEXT NOT NULL DEFAULT ''";
+            migrate.ExecuteNonQuery();
+        }
+        using var reminderProbe=db.CreateCommand();
+        reminderProbe.CommandText="SELECT 1 FROM pragma_table_info('ReviewReminders') WHERE name='AttemptCount'";
+        if(reminderProbe.ExecuteScalar() is null) {
+            using var migrate=db.CreateCommand();
+            migrate.CommandText="ALTER TABLE ReviewReminders ADD COLUMN AttemptCount INTEGER NOT NULL DEFAULT 0";
             migrate.ExecuteNonQuery();
         }
     }
@@ -172,16 +180,32 @@ internal sealed class AnnualReviewStore {
         return result.ToArray();
     }
     internal bool Claim(long id,int days,string channel) {
-        using var db=Open();using var cmd=db.CreateCommand();
-        cmd.CommandText="""
-            INSERT OR IGNORE INTO ReviewReminders(ReviewId,DaysBefore,Channel,Status,AttemptedAt)
-            VALUES($id,$days,$channel,'Processing',$at)
+        using var db=Open();
+        using var tx=db.BeginTransaction();
+        var now=DateTimeOffset.UtcNow;
+        using var insert=db.CreateCommand();
+        insert.Transaction=tx;
+        insert.CommandText="""
+            INSERT OR IGNORE INTO ReviewReminders(ReviewId,DaysBefore,Channel,Status,AttemptedAt,AttemptCount)
+            VALUES($id,$days,$channel,'Processing',$at,1)
             """;
-        cmd.Parameters.AddWithValue("$id",id);
-        cmd.Parameters.AddWithValue("$days",days);
-        cmd.Parameters.AddWithValue("$channel",channel);
-        cmd.Parameters.AddWithValue("$at",DateTimeOffset.UtcNow.ToString("O"));
-        return cmd.ExecuteNonQuery()==1;
+        insert.Parameters.AddWithValue("$id",id);
+        insert.Parameters.AddWithValue("$days",days);
+        insert.Parameters.AddWithValue("$channel",channel);
+        insert.Parameters.AddWithValue("$at",now.ToString("O"));
+        if(insert.ExecuteNonQuery()==1){tx.Commit();return true;}
+        using var retry=db.CreateCommand();retry.Transaction=tx;
+        retry.CommandText="""
+            UPDATE ReviewReminders SET Status='Processing',AttemptCount=AttemptCount+1,AttemptedAt=$at
+            WHERE ReviewId=$id AND DaysBefore=$days AND Channel=$channel
+              AND Status='Failed' AND AttemptCount<3 AND AttemptedAt<=$before
+            """;
+        retry.Parameters.AddWithValue("$at",now.ToString("O"));
+        retry.Parameters.AddWithValue("$before",now.AddHours(-1).ToString("O"));
+        retry.Parameters.AddWithValue("$id",id);
+        retry.Parameters.AddWithValue("$days",days);
+        retry.Parameters.AddWithValue("$channel",channel);
+        var changed=retry.ExecuteNonQuery()==1;tx.Commit();return changed;
     }
     internal void Finish(long id,int days,string channel,bool success,string? error) {
         using var db=Open();using var cmd=db.CreateCommand();

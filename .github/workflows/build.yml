@@ -34,6 +34,7 @@ jobs:
             if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
           }
       - run: dotnet run --project tests/AccessPolicy/AccessPolicy.Tests.csproj -c Release
+      - run: dotnet run --project tests/HandoverLifecycle/HandoverLifecycle.Tests.csproj -c Release
       - run: dotnet restore AssetsPortal.csproj
       - run: dotnet build AssetsPortal.csproj -c Release --no-restore
       - run: dotnet publish AssetsPortal.csproj -c Release -r win-x64 --self-contained false -p:UseAppHost=false -o out/AssetsPortal

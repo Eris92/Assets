@@ -55,7 +55,12 @@ internal static class HandoverDirectory {
     public static HandoverPerson Resolve(string login) {
         if (string.IsNullOrWhiteSpace(login) || login.Length > 128 || login.Any(char.IsControl))
             throw new ArgumentException("Invalid AD login");
-        var result = Find("(samaccountname=" + EscapeFilter(login.Trim()) + ")", 2);
+        var sam=login.Trim().Split('\\').Last();
+        if(string.IsNullOrWhiteSpace(sam)||sam.Length>128)
+            throw new ArgumentException("Invalid AD samAccountName");
+        var filter=sam.Contains('@') ? "(userprincipalname=" + EscapeFilter(sam) + ")" :
+            "(samaccountname=" + EscapeFilter(sam) + ")";
+        var result=Find(filter,2);
         if (result.Count != 1) throw new InvalidOperationException("User not found or ambiguous in Active Directory");
         return result[0];
     }
