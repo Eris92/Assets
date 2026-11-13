@@ -1,5 +1,4 @@
 using Microsoft.Data.Sqlite;
-record HandoverItem(string Id,string Key,string Name,string Type,string OwnerSnapshot);
 
 static void Verify(bool result,string description){
     if(!result)throw new Exception("FAILED: "+description);
@@ -77,3 +76,5 @@ try {
     SqliteConnection.ClearAllPools();
     Directory.Delete(folder,true);
 }
+
+record HandoverItem(string Id,string Key,string Name,string Type,string OwnerSnapshot);
