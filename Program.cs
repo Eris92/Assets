@@ -949,7 +949,12 @@ app.MapGet("/api/handover/protocols/{id:long}/evidence", (HttpContext ctx,long i
 });
 
 app.MapGet("/api/handover/protocols/{id:long}/print", (HttpContext ctx, long id) => {
-    if (!CanHandover(ctx.User)) return AuthError(ctx);
+    var stages = custody.Stages(id);
+    if(stages.Length==0)return Results.NotFound();
+    if(!CanHandover(ctx.User) && !stages.Any(s =>
+        string.Equals(s.SenderLogin,ctx.User.Identity?.Name,StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(s.ReceiverLogin,ctx.User.Identity?.Name,StringComparison.OrdinalIgnoreCase)))
+        return AuthError(ctx);
     using var db = new SqliteConnection(ConnectionString()); db.Open();
     using var cmd = db.CreateCommand();
     cmd.CommandText = """
@@ -976,7 +981,9 @@ app.MapGet("/api/handover/protocols/{id:long}/print", (HttpContext ctx, long id)
         "<p>Data UTC: " + E(reader.GetString(7)) +
         "<br>Osoba wydajaca: " + E(reader.GetString(1)) + " (" + E(reader.GetString(2)) + ")" +
         "<br>Osoba odbierajaca: " + E(reader.GetString(3)) + " (" + E(reader.GetString(4)) + ")" +
-        "<br>Przygotowal: " + E(reader.GetString(8)) + "</p>" +
+        "<br>Przygotowal: " + E(reader.GetString(8)) +
+        "<br>Etapy potwierdzen: " + E(string.Join(" | ", stages.Select(st =>
+            st.StageNumber + ": " + st.SenderLogin + " -> " + st.ReceiverLogin + " [" + st.Status + "]"))) + "</p>" +
         "<table><tr><th>ID</th><th>Sprzet</th><th>Typ</th></tr>" + rows + "</table>" +
         "<p>Uwagi: " + E(reader.GetString(6)) + "</p>" +
         "<div class=\"sign\"><div>Podpis wydajacego / zdającego</div>" +

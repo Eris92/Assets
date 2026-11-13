@@ -257,6 +257,7 @@ internal sealed class HandoverLifecycle {
             protocolId=rd.GetInt64(0),stage=rd.GetInt32(1),sender=rd.GetString(2),
             receiver=rd.GetString(3),status=rd.GetString(4),evidenceMode=rd.GetString(5),
             dispatchedAt=rd.GetString(6),receivedAt=rd.GetString(7),
+            items=JsonSerializer.Deserialize<HandoverItem[]>(rd.GetString(8))??[],
             assetCount=(JsonSerializer.Deserialize<HandoverItem[]>(rd.GetString(8))??[]).Length,
             createdAt=rd.GetString(9),protocolStatus=rd.GetString(10)
         });
