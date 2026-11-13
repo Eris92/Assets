@@ -99,6 +99,8 @@ using (var db = new SqliteConnection(ConnectionString())) {
     }
 }
 
+var delegations = new TeamDelegations(ConnectionString());
+delegations.Initialize();
 var audit = new OperationalAudit(ConnectionString(), app.Logger);
 audit.Initialize();
 var deployments = new DeploymentCoordinator(dataDirectory, app.Environment.ContentRootPath);
@@ -228,6 +230,7 @@ TeamMember[] TeamDirectory() {
 }
 TeamMember[] ReportsTo(string login) {
     var directory = TeamDirectory();
+    if (directory.Length == 0) return HandoverDirectory.ManagedTeam(login);
     var result = new List<TeamMember>();
     var visited = new HashSet<string> { LoginKey(login) };
     var queue = new Queue<string>(); queue.Enqueue(login);
@@ -238,6 +241,16 @@ TeamMember[] ReportsTo(string login) {
         }
     }
     return result.ToArray();
+}
+
+TeamMember[] EffectiveTeam(string login) {
+    var map = new Dictionary<string,TeamMember>(StringComparer.OrdinalIgnoreCase);
+    foreach (var person in ReportsTo(login)) map.TryAdd(person.Login,person);
+    // Delegated access does not itself create any additional manager authority.
+    foreach (var delegation in delegations.ByDelegate(login)) {
+        foreach (var member in ReportsTo(delegation.ManagerLogin)) map.TryAdd(member.Login,member);
+    }
+    return map.Values.Take(1500).ToArray();
 }
 bool OwnerMatches(string owner, string login) => owner.Split(',', StringSplitOptions.TrimEntries).Any(v =>
     v.Equals(login, StringComparison.OrdinalIgnoreCase) || v.Equals(login.Split('\\').Last(), StringComparison.OrdinalIgnoreCase));
@@ -313,7 +326,7 @@ app.MapGet("/api/me", (HttpContext ctx, IAntiforgery anti) => {
         var decision = access.Check(ctx.User);
         var tokens = decision.Allowed ? anti.GetAndStoreTokens(ctx) : null;
         return Results.Ok(new { name = ctx.User.Identity.Name, authenticationType = ctx.User.Identity.AuthenticationType,
-            allowed = decision.Allowed, accessReason = decision.Reason, bootstrap = decision.Bootstrap, manager = decision.Allowed && ReportsTo(ctx.User.Identity.Name!).Length > 0, admin = decision.Admin, handover = decision.Allowed && CanHandover(ctx.User), adminGroup = Setting("AdminGroup", "Portal:AdminGroup"), csrf = tokens?.RequestToken,
+            allowed = decision.Allowed, accessReason = decision.Reason, bootstrap = decision.Bootstrap, manager = decision.Allowed && EffectiveTeam(ctx.User.Identity.Name!).Length > 0, admin = decision.Admin, handover = decision.Allowed && CanHandover(ctx.User), adminGroup = Setting("AdminGroup", "Portal:AdminGroup"), csrf = tokens?.RequestToken,
             allowedAttributes = AllowedAttributes() });
     } catch (CryptographicException ex) {
         app.Logger.LogError(ex, "Unable to create /api/me antiforgery token. Verify Assets DPAPI key ring and IIS AppPool identity");
@@ -751,25 +764,126 @@ app.MapGet("/api/assets", async (HttpContext ctx) => {
     } catch (Exception ex) { app.Logger.LogError(ex, "Asset query failed"); return Results.Problem("Nie udalo sie pobrac danych Jira.", statusCode: 502); }
 });
 
+
 app.MapGet("/api/team", async (HttpContext ctx) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     try {
-        var people = ReportsTo(ctx.User.Identity.Name!);
-        if (people.Length == 0) return Results.Ok(new { people = Array.Empty<object>(), equipment = Array.Empty<object>() });
+        var actor = ctx.User.Identity.Name!;
+        var people = EffectiveTeam(actor);
+        if (people.Length == 0) return Results.Ok(new { people = Array.Empty<object>(), equipment = Array.Empty<object>(), error = "No AD manager hierarchy, configured team.json or substitute assignment for this user." });
         var ownerId = Setting("OwnerAttributeId", "Jira:OwnerAttributeId");
-        if (string.IsNullOrWhiteSpace(ownerId)) return Results.Problem("Configure Jira OwnerAttributeId", statusCode: 503);
-        var objects = await QueryAssets("objectId > 0");
-        var equipment = new List<object>();
-        foreach (var obj in objects) {
-            var owners = people.Where(p => OwnerMatches(AttributeValue(Attribute(obj, ownerId)), p.Login)).ToArray();
-            if (owners.Length != 1) continue;
-            equipment.Add(new { id = obj["id"]?.ToString(), key = obj["objectKey"]?.ToString(), name = obj["name"]?.ToString(), owner = owners[0].Login,
-                type = obj["objectType"]?["name"]?.ToString(),
-                attributes = (obj["attributes"]?.AsArray() ?? new JsonArray()).Select(a => new {
-                    id = a?["objectTypeAttributeId"]?.ToString(), name = a?["objectTypeAttribute"]?["name"]?.ToString() ?? a?["objectTypeAttributeId"]?.ToString(), value = AttributeValue(a) }) });
+        if (!long.TryParse(ownerId,out _)) return Results.Problem("Configure Jira OwnerAttributeId", statusCode:503);
+        var delegatedRoots = delegations.ByDelegate(actor).Select(x=>x.ManagerLogin).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var equipment = new System.Collections.Concurrent.ConcurrentBag<object>();
+        var failures = new System.Collections.Concurrent.ConcurrentBag<string>();
+        using var gate = new SemaphoreSlim(3);
+        var tasks = people.Select(async person => {
+            await gate.WaitAsync(ctx.RequestAborted);
+            try {
+                // AQL reference lookup by actual AD mail, never raw displayValue comparison.
+                var ad = await Task.Run(()=>HandoverDirectory.Resolve(person.Login),ctx.RequestAborted);
+                var objects = await QueryAssets(SafeOwnerAql(ad));
+                foreach (var obj in objects.Where(IsEquipment)) {
+                    equipment.Add(new {
+                        id=obj["id"]?.ToString(), key=obj["objectKey"]?.ToString(),
+                        name=obj["name"]?.ToString() ?? obj["label"]?.ToString(),
+                        owner=person.Login, type=obj["objectType"]?["name"]?.ToString(),
+                        attributes=(obj["attributes"]?.AsArray() ?? new JsonArray()).Select(a=>new {
+                            id=a?["objectTypeAttributeId"]?.ToString(),
+                            name=a?["objectTypeAttribute"]?["name"]?.ToString() ?? a?["objectTypeAttributeId"]?.ToString(),
+                            value=AttributeValue(a)
+                        }).ToArray()
+                    });
+                }
+            } catch (Exception ex) {
+                app.Logger.LogWarning(ex,"Team inventory lookup failed for a scoped employee");
+                failures.Add(person.Login);
+            } finally { gate.Release(); }
+        });
+        await Task.WhenAll(tasks);
+        if (!failures.IsEmpty) {
+            return Results.Problem("Nie udalo sie pobrac sprzetu wszystkich pracownikow. Nie pokazano niepelnej listy. Sprawdz AD/Jira i logi.",
+                statusCode:502);
         }
-        return Results.Ok(new { people = people.Select(p => new { id = p.Login, name = p.Name, role = p.Role, manager = LoginKey(p.Manager) == LoginKey(ctx.User.Identity.Name!) ? "me" : p.Manager }), equipment });
-    } catch (Exception ex) { app.Logger.LogError(ex, "Team query failed"); return Results.Problem("Nie udalo sie pobrac zespolu. Sprawdz team.json i Jira.", statusCode: 502); }
+        return Results.Ok(new {
+            people=people.Select(p=>new {
+                id=p.Login,name=p.Name,role=p.Role,
+                manager=LoginKey(p.Manager)==LoginKey(actor) || delegatedRoots.Contains(p.Manager) ? "me" : p.Manager,
+                delegated=delegatedRoots.Contains(p.Manager) || !ReportsTo(actor).Any(x=>LoginKey(x.Login)==LoginKey(p.Login))
+            }),
+            equipment=equipment.OrderBy(x=>System.Text.Json.JsonSerializer.Serialize(x)).ToArray()
+        });
+    } catch (Exception ex) {
+        app.Logger.LogError(ex,"Team query failed");
+        return Results.Problem("Nie udalo sie pobrac zespolu z AD/Jira.",statusCode:502);
+    }
+});
+
+app.MapGet("/api/team/delegations", (HttpContext ctx) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    return Results.Ok(new {
+        own = delegations.ByManager(ctx.User.Identity.Name!),
+        grantedToMe = delegations.ByDelegate(ctx.User.Identity.Name!)
+    });
+});
+app.MapPost("/api/team/delegations", async (HttpContext ctx, IAntiforgery anti, DelegateInput input) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    await anti.ValidateRequestAsync(ctx);
+    var actor=ctx.User.Identity.Name!;
+    if (ReportsTo(actor).Length==0) return Results.Forbid();
+    if (string.IsNullOrWhiteSpace(input.Login) || input.Login.Length>128)
+        return Results.BadRequest(new{error="Invalid substitute login"});
+    try {
+        var substitute=await Task.Run(()=>HandoverDirectory.Resolve(input.Login),ctx.RequestAborted);
+        var domain=actor.Contains('\\')?actor.Split('\\')[0]:"";
+        var canonical=string.IsNullOrWhiteSpace(domain)?substitute.Login:domain+"\\"+substitute.Login;
+        if (string.Equals(canonical,actor,StringComparison.OrdinalIgnoreCase))
+            return Results.BadRequest(new{error="Cannot delegate to self"});
+        var row=delegations.Add(actor,canonical,actor);
+        audit.Write(actor,"Server","TeamDelegate.Add",canonical,"Granted",
+            ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,201);
+        return Results.Created("/api/team/delegations",row);
+    } catch (InvalidOperationException ex) {
+        return Results.Conflict(new{error=ex.Message});
+    } catch (SqliteException ex) when(ex.SqliteErrorCode==19) {
+        return Results.Conflict(new{error="Substitute is already assigned"});
+    } catch (Exception ex) {
+        app.Logger.LogError(ex,"Failed to resolve substitute");
+        return Results.Problem("Nie mozna zweryfikowac wskazanego konta w AD.",statusCode:502);
+    }
+});
+app.MapDelete("/api/team/delegations/{id:long}", async (HttpContext ctx, IAntiforgery anti,long id) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    await anti.ValidateRequestAsync(ctx);
+    if (!delegations.Revoke(ctx.User.Identity.Name!,id))return Results.NotFound();
+    audit.Write(ctx.User.Identity.Name!,"Server","TeamDelegate.Revoke",id.ToString(),"Revoked",
+        ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,200);
+    return Results.NoContent();
+});
+
+app.MapGet("/api/permissions", async (HttpContext ctx) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    try {
+        var groups=await Task.Run(()=>HandoverDirectory.DirectGroups(ctx.User.Identity.Name!),ctx.RequestAborted);
+        return Results.Ok(new{login=ctx.User.Identity.Name, source="AD direct memberOf",groups});
+    } catch(Exception ex) {
+        app.Logger.LogError(ex,"AD groups lookup failed");
+        return Results.Problem("Nie mozna odczytac uprawnien AD.",statusCode:502);
+    }
+});
+app.MapGet("/api/team/permissions", async (HttpContext ctx,string? login) => {
+    if (ctx.User.Identity?.IsAuthenticated!=true) return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(login) || login.Length>256) return Results.BadRequest();
+    var target=EffectiveTeam(ctx.User.Identity.Name!).FirstOrDefault(x=>
+        x.Login.Equals(login,StringComparison.OrdinalIgnoreCase));
+    if(target is null)return Results.Forbid();
+    try {
+        var groups=await Task.Run(()=>HandoverDirectory.DirectGroups(target.Login),ctx.RequestAborted);
+        return Results.Ok(new { login=target.Login,name=target.Name,source="AD direct memberOf",groups });
+    } catch(Exception ex) {
+        app.Logger.LogError(ex,"Team AD groups lookup failed");
+        return Results.Problem("Nie mozna odczytac uprawnien AD.",statusCode:502);
+    }
 });
 
 app.MapPost("/api/reports", async (HttpContext ctx, IAntiforgery anti, ReportInput input) => {
@@ -976,6 +1090,7 @@ app.MapPost("/api/reports/{id:long}/decision", async (HttpContext ctx, IAntiforg
 
 app.Run();
 
+record DelegateInput(string Login);
 record DeploymentInput(string? Action);
 record ClickInput(string Target, string? View);
 record ReportInput(string ObjectId, string? AttributeId, string? ProposedValue, string? Reason, string? Type = null);
