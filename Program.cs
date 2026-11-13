@@ -1,3 +1,4 @@
+using System.Net.Mail;
 using System.Threading.RateLimiting;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -44,8 +45,23 @@ builder.Services.AddRateLimiter(options => {
                 PermitLimit = 25, Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0, AutoReplenishment = true
             }));
+    options.AddPolicy("notifyTest", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.User.Identity?.Name ?? "Anonymous",
+            _ => new FixedWindowRateLimiterOptions {
+                PermitLimit = 2, Window = TimeSpan.FromMinutes(5), QueueLimit = 0,
+                AutoReplenishment = true
+            }));
     options.RejectionStatusCode = 429;
 });
+builder.Services.AddSingleton(new AnnualReviewStore(new SqliteConnectionStringBuilder {
+    DataSource = dbPath, Mode = SqliteOpenMode.ReadWriteCreate }.ToString()));
+builder.Services.AddSingleton<PortalNotificationService>(sp =>
+    new PortalNotificationService(
+        new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadWriteCreate }.ToString(),
+        sp.GetRequiredService<IDataProtectionProvider>(),
+        sp.GetRequiredService<ILogger<PortalNotificationService>>()));
+builder.Services.AddHostedService<ReviewReminderWorker>();
 var app = builder.Build();
 app.UseHttpsRedirection();
 app.UseAuthentication();
@@ -103,6 +119,9 @@ var delegations = new TeamDelegations(ConnectionString());
 delegations.Initialize();
 var custody = new HandoverLifecycle(ConnectionString());
 custody.Initialize();
+var annualReviews = app.Services.GetRequiredService<AnnualReviewStore>();
+annualReviews.Initialize();
+var notifications = app.Services.GetRequiredService<PortalNotificationService>();
 var audit = new OperationalAudit(ConnectionString(), app.Logger);
 audit.Initialize();
 var deployments = new DeploymentCoordinator(dataDirectory, app.Environment.ContentRootPath);
@@ -748,6 +767,145 @@ app.MapGet("/api/handover/protocols", (HttpContext ctx) => {
 });
 
 
+
+// Annual inventory and rights review: data is collected from current authoritative
+// sources, then the user explicitly confirms a SHA-256 snapshot. Not a QES.
+app.MapGet("/api/reviews/mine", (HttpContext ctx) => {
+    if(ctx.User.Identity?.IsAuthenticated!=true)return Results.Unauthorized();
+    try {
+        return Results.Ok(annualReviews.Ensure(ctx.User.Identity.Name!,
+            key=>Setting(key,"Reviews:"+key)));
+    } catch(Exception ex) {
+        app.Logger.LogError(ex,"Review registration failed");
+        return Results.Problem("Nie mozna utworzyc przegladu rocznego.",statusCode:502);
+    }
+});
+app.MapPost("/api/reviews/{kind}/confirm", async (HttpContext ctx, IAntiforgery anti,
+    string kind, ReviewConfirmInput input) => {
+    if(ctx.User.Identity?.IsAuthenticated!=true)return Results.Unauthorized();
+    await anti.ValidateRequestAsync(ctx);
+    if(!input.Confirmed || kind is not ("assets" or "permissions"))
+        return Results.BadRequest(new {error="Explicit statement required"});
+    try {
+        var login=ctx.User.Identity.Name!;
+        annualReviews.Ensure(login,key=>Setting(key,"Reviews:"+key));
+        string payload;
+        if(kind=="assets") {
+            var entries=await QueryAssets(OwnerAql(ctx.User));
+            var objects=entries.Select(e=>new {
+                id=e["id"]?.ToString(),
+                key=e["objectKey"]?.ToString(),
+                attributes=e["attributes"]?.ToJsonString()
+            }).OrderBy(e=>e.id,StringComparer.Ordinal).ToArray();
+            payload=JsonSerializer.Serialize(objects);
+        } else {
+            var groups=await Task.Run(()=>HandoverDirectory.DirectGroups(login),ctx.RequestAborted);
+            payload=JsonSerializer.Serialize(groups.OrderBy(x=>x,StringComparer.OrdinalIgnoreCase));
+        }
+        var hash=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
+        var result=annualReviews.Confirm(login,kind,hash,input.Discrepancy);
+        audit.Write(login,"Server","Review."+kind,
+            "Annual:"+result.Year,input.Discrepancy?"Discrepancy":"Confirmed",
+            ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,200);
+        return Results.Ok(result);
+    } catch(InvalidOperationException ex) {
+        return Results.Conflict(new{error=ex.Message});
+    } catch(Exception ex) {
+        app.Logger.LogError(ex,"Annual review confirmation failed");
+        return Results.Problem("Nie mozna potwierdzic przegladu. Zmiana nie zostala zapisana.",statusCode:502);
+    }
+});
+app.MapGet("/api/team/reviews",(HttpContext ctx) => {
+    if(ctx.User.Identity?.IsAuthenticated!=true)return Results.Unauthorized();
+    var people=EffectiveTeam(ctx.User.Identity.Name!);
+    return Results.Ok(people.Select(p=>new {
+        p.Login,p.Name,reviews=annualReviews.ForUser(p.Login)
+    }));
+});
+app.MapPost("/api/admin/reviews/manual", async (HttpContext ctx,IAntiforgery anti,
+    ReviewManualInput input) => {
+    if(!IsAdmin(ctx.User))return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    if(string.IsNullOrWhiteSpace(input.Login) || input.Login.Length>256 ||
+       input.Year is <2025 or >2100)return Results.BadRequest();
+    try {
+        // The file must be stored by a separate corporate archive; this form
+        // records its SHA-256 digest and archive locator, not a digital signature.
+        var person=await Task.Run(()=>HandoverDirectory.Resolve(input.Login),ctx.RequestAborted);
+        var domain=ctx.User.Identity!.Name!.Split('\\')[0];
+        var canonical=domain+"\\"+person.Login;
+        var result=annualReviews.Manual(canonical,input.Kind,input.Year,
+            input.Sha256,input.EvidenceReference,ctx.User.Identity.Name!);
+        audit.Write(ctx.User.Identity.Name!,"Server","Review.Manual",
+            canonical+"/"+input.Kind+"/"+input.Year,"ArchivedEvidence",
+            ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,200);
+        return Results.Ok(result);
+    } catch(ArgumentException){return Results.BadRequest();}
+    catch(InvalidOperationException ex){return Results.Conflict(new{error=ex.Message});}
+    catch(Exception ex){app.Logger.LogError(ex,"Manual review confirmation failed");
+        return Results.Problem("Nie mozna zapisac dowodu przegladu.",statusCode:502);}
+});
+app.MapGet("/api/admin/notifications",(HttpContext ctx) => {
+    if(!IsAdmin(ctx.User))return AuthError(ctx);
+    return Results.Ok(new {
+        delivery=notifications.Status(),
+        assetsDueMonthDay=Setting("AssetsDueMonthDay","Reviews:AssetsDueMonthDay")??"12-01",
+        permissionsDueMonthDay=Setting("PermissionsDueMonthDay","Reviews:PermissionsDueMonthDay")??"12-01",
+        evidenceMode=Setting("EvidenceMode","Portal:EvidenceMode")??"hybrid"
+    });
+});
+app.MapPost("/api/admin/notifications", async (HttpContext ctx,IAntiforgery anti,
+    NotificationSettingsInput input) => {
+    if(!IsAdmin(ctx.User))return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    if(input.AssetsDueMonthDay?.Length!=5 || input.PermissionsDueMonthDay?.Length!=5 ||
+       !System.Text.RegularExpressions.Regex.IsMatch(input.AssetsDueMonthDay,@"^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$") ||
+       !System.Text.RegularExpressions.Regex.IsMatch(input.PermissionsDueMonthDay,@"^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$") ||
+       input.EvidenceMode is not ("paper" or "electronic" or "hybrid"))
+       return Results.BadRequest(new{error="Invalid annual review dates or evidence mode"});
+    try {
+        // Validate dates against a leap year; 02-29 is supported only for leap years.
+        foreach(var due in new[]{input.AssetsDueMonthDay,input.PermissionsDueMonthDay}) {
+            var month=int.Parse(due[..2]);var day=int.Parse(due[3..]);
+            if(day>DateTime.DaysInMonth(2028,month))return Results.BadRequest(new{error="Invalid day of month"});
+        }
+        notifications.Save(new NotifierSettings(input.Channel,input.Host,input.Port,
+            input.FromEmail,input.Username,input.SmtpPassword,input.TeamsWebhook));
+        using var db=new SqliteConnection(ConnectionString());db.Open();
+        using var tx=db.BeginTransaction();
+        foreach(var(k,v) in new[]{
+            ("AssetsDueMonthDay",input.AssetsDueMonthDay),
+            ("PermissionsDueMonthDay",input.PermissionsDueMonthDay),
+            ("EvidenceMode",input.EvidenceMode)
+        }){
+            using var cmd=db.CreateCommand();cmd.Transaction=tx;
+            cmd.CommandText="INSERT INTO Settings(Key,Value) VALUES($key,$value) ON CONFLICT(Key) DO UPDATE SET Value=excluded.Value";
+            cmd.Parameters.AddWithValue("$key",k);cmd.Parameters.AddWithValue("$value",v);cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        audit.Write(ctx.User.Identity!.Name!,"Server","NotificationSettings.Update","Notifications","Saved",
+            ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,200);
+        return Results.Ok();
+    } catch(ArgumentException ex){return Results.BadRequest(new{error=ex.Message});}
+});
+app.MapPost("/api/admin/notifications/test", async (HttpContext ctx,IAntiforgery anti,
+    NotificationTestInput input) => {
+    if(!IsAdmin(ctx.User))return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    if(!MailAddress.TryCreate(input.To,out _) || input.To.Length>254 ||
+       input.Channel is not ("Smtp" or "Teams"))return Results.BadRequest();
+    try {
+        await notifications.Send(input.To,"Assets Portal - test powiadomien",
+            "Powiadomienie testowe. Nie wymaga dzialania.",input.Channel,ctx.RequestAborted);
+        audit.Write(ctx.User.Identity!.Name!,"Server","Notification.Test",input.Channel,"Sent",
+            ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,200);
+        return Results.Ok(new {status="Sent"});
+    } catch(Exception ex) {
+        app.Logger.LogError(ex,"Notification test failed");
+        return Results.Problem("Wysylka testowa nie powiodla sie. Sprawdz logi serwera.",statusCode:502);
+    }
+}).RequireRateLimiting("notifyTest");
+
 app.MapGet("/api/handover/inbox", (HttpContext ctx) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     return Results.Ok(custody.Inbox(ctx.User.Identity.Name!,CanHandover(ctx.User)));
@@ -1168,6 +1326,12 @@ app.MapPost("/api/reports/{id:long}/decision", async (HttpContext ctx, IAntiforg
 
 app.Run();
 
+record ReviewConfirmInput(bool Confirmed,bool Discrepancy=false);
+record ReviewManualInput(string Login,string Kind,int Year,string Sha256,string EvidenceReference);
+record NotificationSettingsInput(string Channel,string Host,int Port,string FromEmail,
+    string Username,string? SmtpPassword,string? TeamsWebhook,
+    string AssetsDueMonthDay,string PermissionsDueMonthDay,string EvidenceMode);
+record NotificationTestInput(string Channel,string To);
 record DelegateInput(string Login);
 record DeploymentInput(string? Action);
 record ClickInput(string Target, string? View);
