@@ -1,7 +1,7 @@
 // Operator-only handover UI. API enforces Windows AD group permissions.
 const handover = {
   mode:'return', source:null, target:null, assets:[], selected:new Map(), protocols:[],
-  results:{source:[],target:[]}, queries:{source:'',target:'',asset:''},
+  results:{source:[],target:[]}, queries:{source:'',target:'',asset:'',notes:''},
   timers:{}, busy:false, request:0
 };
 function hEsc(value){ return escapeHtml(value??''); }
@@ -75,7 +75,7 @@ function hRender(){
         <p class="meta">${handover.source?'Sprzęt przypisany do wybranej osoby.':'Wyszukaj katalog Jira (co najmniej 2 znaki).'}</p>
         <div id="handoverItems" class="handover-items"></div>
         <p id="handoverCount" class="handover-counter"></p>
-        <label>Uwagi do protokołu<textarea id="handoverNotes" rows="3" maxlength="2000" placeholder="Stan sprzętu, wyposażenie, informacje dodatkowe..."></textarea></label>
+        <label>Uwagi do protokołu<textarea id="handoverNotes" rows="3" maxlength="2000" placeholder="Stan sprzętu, wyposażenie, informacje dodatkowe...">${hEsc(handover.queries.notes)}</textarea></label>
         <div class="handover-note">Protokół do podpisu. Wygenerowanie dokumentu nie zmienia jeszcze właściciela w Jira.</div>
         <p id="handoverStatus" role="status" aria-live="polite" hidden></p>
         <div class="actions"><button type="button" class="primary" id="handoverSubmit" disabled>Utwórz protokół</button></div>
@@ -177,6 +177,8 @@ document.addEventListener('input',e=>{
   }else if(field==='hAssetSearch'){
     handover.queries.asset=e.target.value;clearTimeout(handover.timers.asset);
     handover.timers.asset=setTimeout(hFetchAssets,550);
+  }else if(field==='handoverNotes'){
+    handover.queries.notes=e.target.value;
   }
 });
 document.addEventListener('change',e=>{
