@@ -13,3 +13,46 @@
 .dialogOwner{font-size:14px;color:#526b7c;margin:10px 0 0}.dialogOwner:empty{display:none}.reportEquipment{white-space:nowrap}
 
 .equipmentTable .equipmentAction{width:180px;min-width:180px;max-width:180px;white-space:nowrap}.equipmentTable .equipmentAction .reportEquipment{width:148px;text-align:center}
+
+/* Stable desktop sidebar: page scrolls, sidebar never gains inner scrollbars. */
+@media(min-width:761px){
+ .shell{grid-template-columns:270px minmax(0,1fr)}
+ aside{width:270px;min-width:270px;position:sticky;top:0;align-self:start;min-height:100vh;height:auto!important;overflow:visible!important;gap:23px;padding:24px 17px}
+ aside nav{gap:3px;align-content:start}
+ aside .sidebarBottom{margin-top:32px}
+}
+nav button{display:flex;align-items:center;gap:9px;min-height:39px}
+nav .navIcon{width:17px;height:17px;flex:0 0 17px;opacity:.82}
+nav .equipmentSubnav .navIcon{width:15px;height:15px;flex-basis:15px}
+nav button.active .navIcon,nav button:hover .navIcon{opacity:1;color:#70dcca}
+@media(max-width:760px){
+ aside nav{display:flex;flex-wrap:wrap;overflow:visible}
+ .equipmentGroup{min-width:0;flex:1 1 170px}
+ aside{overflow:visible}
+}
+/* Operator handover workflow */
+.handover-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
+.handover-tabs button[aria-selected="true"]{background:#086c72;color:#fff;border-color:#086c72}
+.handover-layout{display:grid;grid-template-columns:minmax(260px,0.75fr) minmax(0,1.6fr);gap:16px;align-items:start}
+.handover-layout .settingsCard{max-width:none;min-width:0}
+.handover-field{display:grid;gap:7px;margin:12px 0}
+.handover-field label{margin:0}
+.handover-field input{width:100%}
+.handover-results{border:1px solid #d7e3e8;border-radius:9px;max-height:190px;overflow:auto;background:#fff}
+.handover-results:empty{display:none}
+.handover-results button{display:block;background:#fff;border:0;border-bottom:1px solid #edf2f5;text-align:left;width:100%;padding:10px 12px;color:#234358}
+.handover-results button:hover{background:#eaf5f3}
+.handover-results small{display:block;color:#72919d;font-size:11px;margin-top:4px}
+.handover-selected{background:#e8f6f2;color:#176e68;border-radius:7px;padding:10px 12px;font-weight:650}
+.handover-selected button{float:right;border:0;background:none;color:#9b4240;font-weight:700}
+.handover-items{max-height:370px;overflow:auto;border:1px solid #dde8ec;border-radius:10px}
+.handover-items label{display:flex;align-items:center;gap:12px;padding:12px;border-bottom:1px solid #edf2f4;margin:0;cursor:pointer}
+.handover-items input{width:19px;flex:0 0 19px;accent-color:#086c72}
+.handover-items small{display:block;font-size:11px;color:#77909b;margin-top:3px}
+.handover-items label:hover{background:#f3faf8}
+.handover-counter{font-size:12px;color:#516e7f;margin:12px 0}
+.handover-history{margin-top:24px}
+.handover-history .protocol-row{display:flex;justify-content:space-between;align-items:center;gap:14px;border-top:1px solid #e3eaef;padding:11px 0}
+.handover-history small{color:#748e9c;display:block;margin-top:4px}
+.handover-note{color:#75552c;background:#fff5df;border-radius:8px;padding:12px;margin:13px 0;font-size:13px}
+@media(max-width:1080px){.handover-layout{grid-template-columns:1fr}}

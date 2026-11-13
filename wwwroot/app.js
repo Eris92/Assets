@@ -19,6 +19,7 @@ function message(text, error = false) { $('message').textContent = text; $('mess
 function view(name) {
   if (!me?.allowed) return;
   if ((name === 'access' || name === 'admin' || name === 'settings' || name === 'deployment' || name === 'audit' || name === 'entra') && !me?.admin) return;
+  if(name === 'handover' && !me?.handover) return;
   for (const item of ['assets','team','handover','permissions','teamPermissions','reports','admin','settings','deployment','audit','entra','access']) $(item+'View').hidden = item !== name;
   document.querySelectorAll('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === name));
   const equipmentView = name === 'assets' || name === 'team' || name === 'handover';
@@ -32,12 +33,12 @@ function view(name) {
   if (settingsView) { $('settingsSubnav').hidden = false; $('settingsNav').setAttribute('aria-expanded','true'); }
   $('title').textContent = ({assets:'M\u00f3j sprz\u0119t',team:'Sprz\u0119t mojego zespo\u0142u',handover:'Zdanie sprz\u0119tu',permissions:'Moje uprawnienia',teamPermissions:'Uprawnienia mojego zespo\u0142u',reports:'Moje zgłoszenia',admin:'Administracja',access:'Dostep do portalu',settings:'Ustawienia - Jira',deployment:'Aktualizacje',audit:'Logi audytu',entra:'Ustawienia - Entra ID'})[name];
   $('subtitle').textContent = ({assets:'Sprawdz przypisane elementy. Zglos sprzet, ktorego nie posiadasz.',team:'Zasoby bezposrednich i posrednich podwladnych.',handover:'Protok\u00f3\u0142 zdawczo-odbiorczy i zwrot sprz\u0119tu.',teamPermissions:'Dostepy bezposrednich i posrednich podwladnych.',permissions:'Przypisane dostepy do systemow i aplikacji.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.',access:'Zarzadzanie dostepem uzytkownikow i grup AD.',entra:'Polaczenie Microsoft Entra ID i dane organizacji.',settings:'Połączenie Jira, uprawnienia administratorów i zakres korekt.',deployment:'Aktualizacja z GitHub oraz przywrocenie poprzedniej wersji.',audit:'Kto, kiedy i jaka operacje wykonal w portalu.'})[name];
-  message(''); if (name === 'team') loadTeam(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'settings') loadSettings(); if (name === 'deployment') loadDeployment(); if (name === 'audit') loadAudit(); if (name === 'access') loadAccess();
+  message(''); if (name === 'team') loadTeam(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'handover' && typeof loadHandover === 'function') loadHandover(); if (name === 'settings') loadSettings(); if (name === 'deployment') loadDeployment(); if (name === 'audit') loadAudit(); if (name === 'access') loadAccess();
 }
 async function loadSettings() {
   try {
     const settings = await api('/api/admin/settings');
-    for (const id of ['siteUrl','accountEmail','cloudId','workspaceId','aql','ownerAttributeId','adminGroup']) $(id).value = settings[id] || '';
+    for (const id of ['siteUrl','accountEmail','cloudId','workspaceId','aql','ownerAttributeId','adminGroup','handoverGroup']) $(id).value = settings[id] || '';
     $('allowedIds').value = settings.allowedCorrectionAttributeIds.join(', ');
     $('apiToken').value = '';
     $('tokenStatus').textContent = settings.tokenConfigured ? 'Token zapisany. Pozostaw puste, aby go zachować.' : 'Token nie jest zapisany.';
@@ -110,7 +111,7 @@ $('adminReports').addEventListener('click', async e => {
 $('refresh').onclick = loadAssets; $('refreshAdmin').onclick = loadReports;
 $('settingsForm').addEventListener('submit', async e => {
   e.preventDefault();
-  const data = Object.fromEntries(['siteUrl','accountEmail','cloudId','workspaceId','aql','ownerAttributeId','adminGroup'].map(id => [id,$(id).value.trim()]));
+  const data = Object.fromEntries(['siteUrl','accountEmail','cloudId','workspaceId','aql','ownerAttributeId','adminGroup','handoverGroup'].map(id => [id,$(id).value.trim()]));
   data.allowedCorrectionAttributeIds = $('allowedIds').value.split(',').map(x => x.trim()).filter(Boolean);
   data.apiToken = $('apiToken').value;
   try {
@@ -132,6 +133,7 @@ setupEquipmentFilters('asset','assetFilters',renderPersonalEquipment);
 function hideProtectedViews() {
   for(const item of ['assets','team','handover','permissions','teamPermissions','reports','admin','settings','deployment','audit','entra','access']) $(item+'View').hidden=true;
   $('adminNav').hidden=$('settingsGroup').hidden=true;
+  $('handoverNav').hidden=true;
 }
 async function signIn() {
   $('authPanel').hidden=true;
@@ -145,10 +147,11 @@ async function signIn() {
     if(!me.allowed){
       $('authPanel').hidden=false;
       $('authTitle').textContent='Zalogowano do Windows, ale nie nadano dostepu';
-      $('authDetail').textContent=`Konto: ${me.name}. Powod: ${me.accessReason}. Administrator musi dodac konto lub grupe w Ustawienia > Dostep do portalu. Pierwszego administratora konfiguruje sie w ProgramData/AssetsPortal/appsettings.json (Portal:AdminGroup lub Portal:AdminUsers).`;
+      $('authDetail').textContent=`Konto: ${me.name}. Powod: ${me.accessReason}. Administrator musi dodac konto lub grupe w Ustawienia > Dostep do portalu. Pierwszego administratora konfiguruje sie w ProgramData/Assets/appsettings.json (Portal:AdminGroup lub Portal:AdminUsers).`;
       return;
     }
     $('teamNav').hidden=!me.manager;
+    $('handoverNav').hidden=!me.handover;
     $('adminNav').hidden=$('settingsGroup').hidden=!me.admin;
     view('assets');
     await Promise.all([loadAssets(),loadReports()]);

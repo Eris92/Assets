@@ -1,5 +1,35 @@
 # Assets Portal
 
+## Handover and assigned-asset visibility
+
+Regular /api/assets reads are filtered only by the authenticated Windows
+identity's referenced Jira owner email. Legacy configured AQL is optional and
+is **not** applied to self-service, team lists or handover catalog. This avoids
+silently excluding equipment classes outside "Sprzet uzytkownika".
+
+The separate HandoverGroup (Portal:HandoverGroup, configurable under
+Settings > Jira) is an AD security group or SID. Only its members and portal
+admins may call /api/handover/* or see the handover navigation item.
+Users outside this group never receive the wider inventory or AD search results.
+Group membership must be in the IIS Windows logon token.
+
+Handover staff can:
+- search AD users by login, display name or email (bounded read-only signed/sealed LDAP)
+- list assets owned by a selected employee, or search the whole Jira catalog
+- select 1-20 assets and prepare a return or transfer protocol
+- print a snapshot protocol for manual signatures, with date, actor and item list
+- browse the previous 100 prepared protocols
+
+Creating a protocol does not yet execute ownership changes in Jira.
+This prevents an unsigned document from being treated as completed transfer.
+The Jira object owner and original snapshot are validated at creation.
+For very large schemas the unfiltered catalog may hit the current 10,000-object
+safety limit; the backend returns an error rather than silently truncating the
+source inventory. Indexing/search pagination should be implemented if that limit
+is hit in production.
+
+
+
 ## Web update and rollback
 
 Administrators can open Settings > Aktualizacje to queue a verified GitHub release

@@ -374,7 +374,7 @@ app.MapPost("/api/admin/settings", async (HttpContext ctx, IAntiforgery anti, Se
         !site.Host.EndsWith(".atlassian.net", StringComparison.OrdinalIgnoreCase) || site.AbsolutePath != "/" ||
         !IsValidText(input.AccountEmail, 254) || !Guid.TryParse(input.CloudId, out _) ||
         (!string.IsNullOrWhiteSpace(input.WorkspaceId) && !Guid.TryParse(input.WorkspaceId, out _)) ||
-        !IsValidText(input.Aql, 2000) || !IsValidText(input.OwnerAttributeId, 32) ||
+        (input.Aql?.Length ?? 0) > 2000 || !IsValidText(input.OwnerAttributeId, 32) ||
         !long.TryParse(input.OwnerAttributeId, out _) || !IsValidText(input.AdminGroup, 256) ||
         input.AllowedCorrectionAttributeIds is null || input.AllowedCorrectionAttributeIds.Length > 50 ||
         input.AllowedCorrectionAttributeIds.Any(id => !long.TryParse(id, out _)) ||
@@ -399,7 +399,7 @@ app.MapPost("/api/admin/settings", async (HttpContext ctx, IAntiforgery anti, Se
         Save("AccountEmail", input.AccountEmail.Trim());
         Save("CloudId", input.CloudId.Trim());
         Save("WorkspaceId", input.WorkspaceId?.Trim() ?? "");
-        Save("Aql", input.Aql.Trim());
+        Save("Aql", input.Aql?.Trim() ?? "");
         Save("OwnerAttributeId", input.OwnerAttributeId.Trim());
         Save("AllowedCorrectionAttributeIds", string.Join(',', input.AllowedCorrectionAttributeIds.Distinct()));
         Save("AdminGroup", group);
@@ -981,7 +981,7 @@ record ClickInput(string Target, string? View);
 record ReportInput(string ObjectId, string? AttributeId, string? ProposedValue, string? Reason, string? Type = null);
 record TeamMember(string Login, string Name, string Manager, string? Role = null);
 record DecisionInput(string Action);
-record SettingsInput(string SiteUrl, string AccountEmail, string CloudId, string? WorkspaceId, string Aql,
+record SettingsInput(string SiteUrl, string AccountEmail, string CloudId, string? WorkspaceId, string? Aql,
     string OwnerAttributeId, string[] AllowedCorrectionAttributeIds, string AdminGroup, string? ApiToken,
     string? HandoverGroup = null);
 record HandoverProtocolInput(string Mode, string? SourceLogin, string? TargetLogin, string[] AssetIds, string? Notes);
