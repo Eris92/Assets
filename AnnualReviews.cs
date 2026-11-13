@@ -27,6 +27,7 @@ internal sealed class AnnualReviewStore {
               Mode TEXT NOT NULL DEFAULT '',
               CompletedAt TEXT NOT NULL DEFAULT '',
               SnapshotSha256 TEXT NOT NULL DEFAULT '',
+              SnapshotJson TEXT NOT NULL DEFAULT '',
               EvidenceReference TEXT NOT NULL DEFAULT '',
               CompletedBy TEXT NOT NULL DEFAULT '',
               UNIQUE(UserLogin,Kind,Year));
@@ -41,12 +42,19 @@ internal sealed class AnnualReviewStore {
               UNIQUE(ReviewId,DaysBefore,Channel));
             """;
         cmd.ExecuteNonQuery();
+        using var probe=db.CreateCommand();
+        probe.CommandText="SELECT 1 FROM pragma_table_info('AnnualReviews') WHERE name='SnapshotJson'";
+        if(probe.ExecuteScalar() is null){
+            using var migrate=db.CreateCommand();
+            migrate.CommandText="ALTER TABLE AnnualReviews ADD COLUMN SnapshotJson TEXT NOT NULL DEFAULT ''";
+            migrate.ExecuteNonQuery();
+        }
     }
     private static DateOnly DueDate(int year,string value) {
         if (value.Length!=5||value[2]!='-'||!int.TryParse(value[..2],out var month)||
-            !int.TryParse(value[3..],out var day)||month is <1 or >12||day<1||day>DateTime.DaysInMonth(year,month))
+            !int.TryParse(value[3..],out var day)||month is <1 or >12||day<1||day>DateTime.DaysInMonth(2028,month))
             throw new ArgumentException("Invalid review month-day. Use MM-DD");
-        return new DateOnly(year,month,day);
+        return new DateOnly(year,month,Math.Min(day,DateTime.DaysInMonth(year,month)));
     }
     internal AnnualReviewRecord[] Ensure(string login,Func<string,string?> setting) {
         var year=DateTime.UtcNow.Year;
@@ -84,25 +92,45 @@ internal sealed class AnnualReviewStore {
     private static AnnualReviewRecord Read(SqliteDataReader rd) =>
         new(rd.GetInt64(0),rd.GetString(1),rd.GetString(2),rd.GetInt32(3),rd.GetString(4),
             rd.GetString(5),rd.GetString(6),rd.GetString(7),rd.GetString(8),rd.GetString(9));
-    internal AnnualReviewRecord Confirm(string actor,string kind,string snapshot,bool discrepancy) {
+    internal AnnualReviewRecord Confirm(string actor,string kind,string snapshot,string snapshotJson,bool discrepancy) {
         if(kind is not ("assets" or "permissions"))throw new ArgumentException("Invalid review kind");
         if(snapshot.Length!=64||!snapshot.All(Uri.IsHexDigit))throw new ArgumentException("Invalid snapshot hash");
         var year=DateTime.UtcNow.Year;
         using var db=Open();using var cmd=db.CreateCommand();
         cmd.CommandText="""
             UPDATE AnnualReviews SET Status=$status,Mode='electronic',CompletedAt=$at,
-                SnapshotSha256=$hash,EvidenceReference='',CompletedBy=$actor
+                SnapshotSha256=$hash,SnapshotJson=$json,EvidenceReference='',CompletedBy=$actor
             WHERE UserLogin=$user AND Kind=$kind AND Year=$year AND Status IN ('Pending','Discrepancy')
             """;
         cmd.Parameters.AddWithValue("$status",discrepancy?"Discrepancy":"Confirmed");
         cmd.Parameters.AddWithValue("$at",DateTimeOffset.UtcNow.ToString("O"));
         cmd.Parameters.AddWithValue("$hash",snapshot.ToLowerInvariant());
+        cmd.Parameters.AddWithValue("$json",snapshotJson);
         cmd.Parameters.AddWithValue("$actor",actor);
         cmd.Parameters.AddWithValue("$user",actor);
         cmd.Parameters.AddWithValue("$kind",kind);
         cmd.Parameters.AddWithValue("$year",year);
         if(cmd.ExecuteNonQuery()!=1)throw new InvalidOperationException("Review already confirmed or not registered");
         return ForUser(actor).Single(x=>x.Year==year && x.Kind==kind);
+    }
+    internal object Evidence(string login,string kind,int year) {
+        using var db=Open();using var cmd=db.CreateCommand();
+        cmd.CommandText="""
+            SELECT SnapshotSha256,SnapshotJson,Status,CompletedAt,Mode,EvidenceReference
+            FROM AnnualReviews WHERE UserLogin=$user AND Kind=$kind AND Year=$year
+            """;
+        cmd.Parameters.AddWithValue("$user",login);cmd.Parameters.AddWithValue("$kind",kind);
+        cmd.Parameters.AddWithValue("$year",year);
+        using var rd=cmd.ExecuteReader();
+        if(!rd.Read())throw new KeyNotFoundException("Annual review evidence not found");
+        var hash=rd.GetString(0);var json=rd.GetString(1);
+        var recomputed=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))).ToLowerInvariant();
+        return new {
+            login,kind,year,sha256=hash,snapshotIntegrity=json.Length>0&&
+                recomputed.Equals(hash,StringComparison.OrdinalIgnoreCase),
+            snapshotJson=json,status=rd.GetString(2),completedAt=rd.GetString(3),
+            mode=rd.GetString(4),evidenceReference=rd.GetString(5)
+        };
     }
     internal AnnualReviewRecord Manual(string login,string kind,int year,string digest,string reference,string actor) {
         if(kind is not ("assets" or "permissions") || digest.Length!=64 || !digest.All(Uri.IsHexDigit) ||

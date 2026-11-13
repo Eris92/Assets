@@ -781,47 +781,83 @@ app.MapGet("/api/reviews/mine", (HttpContext ctx) => {
         return Results.Problem("Nie mozna utworzyc przegladu rocznego.",statusCode:502);
     }
 });
+async Task<(string Hash,string Json,object Items)> ReadReviewSnapshot(ClaimsPrincipal actor,CancellationToken token,string kind) {
+    if(kind=="assets") {
+        var entries=await QueryAssets(OwnerAql(actor));
+        var normalized=entries.Select(e=>new {
+            id=e["id"]?.ToString(),key=e["objectKey"]?.ToString(),
+            attributes=e["attributes"]?.ToJsonString()
+        }).OrderBy(e=>e.id,StringComparer.Ordinal).ToArray();
+        var json=JsonSerializer.Serialize(normalized);
+        var display=entries.Select(e=>new {
+            id=e["id"]?.ToString(),key=e["objectKey"]?.ToString(),
+            name=e["name"]?.ToString()??e["label"]?.ToString(),
+            type=e["objectType"]?["name"]?.ToString(),
+            serial=(e["attributes"] as JsonArray??new JsonArray()).FirstOrDefault(a=>
+                (a?["objectTypeAttribute"]?["name"]?.ToString()??"").Contains("seryj",StringComparison.OrdinalIgnoreCase))
+                is JsonNode a ? AttributeValue(a) : ""
+        }).OrderBy(e=>e.key,StringComparer.Ordinal).ToArray();
+        return (Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))).ToLowerInvariant(),json,display);
+    }
+    if(kind=="permissions") {
+        var groups=await Task.Run(()=>HandoverDirectory.DirectGroups(actor.Identity!.Name!),token);
+        var sorted=groups.OrderBy(x=>x,StringComparer.OrdinalIgnoreCase).ToArray();
+        var json=JsonSerializer.Serialize(sorted);
+        return (Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))).ToLowerInvariant(),json,sorted);
+    }
+    throw new ArgumentException("Invalid annual review type");
+}
+app.MapGet("/api/reviews/{kind}/snapshot", async (HttpContext ctx,string kind) => {
+    if(ctx.User.Identity?.IsAuthenticated!=true)return Results.Unauthorized();
+    if(kind is not ("assets" or "permissions"))return Results.BadRequest();
+    try{
+        var snapshot=await ReadReviewSnapshot(ctx.User,ctx.RequestAborted,kind);
+        return Results.Ok(new{kind,sha256=snapshot.Hash,items=snapshot.Items,
+            source=kind=="assets"?"Jira Assets (assigned objects)":"AD direct memberOf"});
+    }catch(Exception ex){
+        app.Logger.LogError(ex,"Annual review snapshot failed");
+        return Results.Problem("Nie mozna pobrac listy do przegladu.",statusCode:502);
+    }
+});
 app.MapPost("/api/reviews/{kind}/confirm", async (HttpContext ctx, IAntiforgery anti,
     string kind, ReviewConfirmInput input) => {
     if(ctx.User.Identity?.IsAuthenticated!=true)return Results.Unauthorized();
     await anti.ValidateRequestAsync(ctx);
-    if(!input.Confirmed || kind is not ("assets" or "permissions"))
-        return Results.BadRequest(new {error="Explicit statement required"});
+    if(!input.Confirmed || kind is not ("assets" or "permissions") ||
+       string.IsNullOrWhiteSpace(input.ExpectedHash) || input.ExpectedHash.Length!=64 ||
+       !input.ExpectedHash.All(Uri.IsHexDigit))
+       return Results.BadRequest(new{error="Review must be based on the inspected snapshot"});
     try {
         var login=ctx.User.Identity.Name!;
         annualReviews.Ensure(login,key=>Setting(key,"Reviews:"+key));
-        string payload;
-        if(kind=="assets") {
-            var entries=await QueryAssets(OwnerAql(ctx.User));
-            var objects=entries.Select(e=>new {
-                id=e["id"]?.ToString(),
-                key=e["objectKey"]?.ToString(),
-                attributes=e["attributes"]?.ToJsonString()
-            }).OrderBy(e=>e.id,StringComparer.Ordinal).ToArray();
-            payload=JsonSerializer.Serialize(objects);
-        } else {
-            var groups=await Task.Run(()=>HandoverDirectory.DirectGroups(login),ctx.RequestAborted);
-            payload=JsonSerializer.Serialize(groups.OrderBy(x=>x,StringComparer.OrdinalIgnoreCase));
-        }
-        var hash=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
-        var result=annualReviews.Confirm(login,kind,hash,input.Discrepancy);
-        audit.Write(login,"Server","Review."+kind,
-            "Annual:"+result.Year,input.Discrepancy?"Discrepancy":"Confirmed",
+        var snapshot=await ReadReviewSnapshot(ctx.User,ctx.RequestAborted,kind);
+        if(!string.Equals(input.ExpectedHash,snapshot.Hash,StringComparison.OrdinalIgnoreCase))
+            return Results.Conflict(new{error="Dane zmienily sie od czasu wyswietlenia. Odswiez liste i przejrzyj ponownie."});
+        var result=annualReviews.Confirm(login,kind,snapshot.Hash,snapshot.Json,input.Discrepancy);
+        audit.Write(login,"Server","Review."+kind,"Annual:"+result.Year,
+            input.Discrepancy?"Discrepancy":"Confirmed",
             ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,200);
         return Results.Ok(result);
-    } catch(InvalidOperationException ex) {
-        return Results.Conflict(new{error=ex.Message});
-    } catch(Exception ex) {
+    }catch(InvalidOperationException ex){return Results.Conflict(new{error=ex.Message});}
+    catch(Exception ex){
         app.Logger.LogError(ex,"Annual review confirmation failed");
         return Results.Problem("Nie mozna potwierdzic przegladu. Zmiana nie zostala zapisana.",statusCode:502);
     }
 });
+app.MapGet("/api/reviews/{kind}/{year:int}/evidence",(HttpContext ctx,string kind,int year) => {
+    if(ctx.User.Identity?.IsAuthenticated!=true)return Results.Unauthorized();
+    if(kind is not ("assets" or "permissions")||year is <2025 or >2100)
+        return Results.BadRequest();
+    try{return Results.Ok(annualReviews.Evidence(ctx.User.Identity.Name!,kind,year));}
+    catch(KeyNotFoundException){return Results.NotFound();}
+});
+
 app.MapGet("/api/team/reviews",(HttpContext ctx) => {
     if(ctx.User.Identity?.IsAuthenticated!=true)return Results.Unauthorized();
     var people=EffectiveTeam(ctx.User.Identity.Name!);
     return Results.Ok(people.Select(p=>new {
-        p.Login,p.Name,reviews=annualReviews.ForUser(p.Login)
-    }));
+        p.Login,p.Name,reviews=annualReviews.Ensure(p.Login,key=>Setting(key,"Reviews:"+key))
+    }).ToArray());
 });
 app.MapPost("/api/admin/reviews/manual", async (HttpContext ctx,IAntiforgery anti,
     ReviewManualInput input) => {
@@ -1371,7 +1407,7 @@ app.MapPost("/api/reports/{id:long}/decision", async (HttpContext ctx, IAntiforg
 
 app.Run();
 
-record ReviewConfirmInput(bool Confirmed,bool Discrepancy=false);
+record ReviewConfirmInput(bool Confirmed,string ExpectedHash,bool Discrepancy=false);
 record ReviewManualInput(string Login,string Kind,int Year,string Sha256,string EvidenceReference);
 record NotificationSettingsInput(string Channel,string Host,int Port,string FromEmail,
     string Username,string? SmtpPassword,string? TeamsWebhook,
