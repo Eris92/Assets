@@ -18,8 +18,8 @@ async function api(path, options = {}) {
 function message(text, error = false) { $('message').textContent = text; $('message').className = error ? 'error' : ''; }
 function view(name) {
   if (!me?.allowed) return;
-  if ((name === 'access' || name === 'admin' || name === 'settings' || name === 'entra') && !me?.admin) return;
-  for (const item of ['assets','team','handover','permissions','teamPermissions','reports','admin','settings','entra','access']) $(item+'View').hidden = item !== name;
+  if ((name === 'access' || name === 'admin' || name === 'settings' || name === 'deployment' || name === 'audit' || name === 'entra') && !me?.admin) return;
+  for (const item of ['assets','team','handover','permissions','teamPermissions','reports','admin','settings','deployment','audit','entra','access']) $(item+'View').hidden = item !== name;
   document.querySelectorAll('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === name));
   const equipmentView = name === 'assets' || name === 'team' || name === 'handover';
   $('equipmentNav').classList.toggle('active', equipmentView);
@@ -27,12 +27,12 @@ function view(name) {
   const permissionsView = name === 'permissions' || name === 'teamPermissions';
   $('permissionsNav').classList.toggle('active', permissionsView);
   if (permissionsView) { $('permissionsSubnav').hidden = false; $('permissionsNav').setAttribute('aria-expanded','true'); }
-  const settingsView = name === 'settings' || name === 'entra' || name === 'access';
+  const settingsView = name === 'settings' || name === 'deployment' || name === 'audit' || name === 'entra' || name === 'access';
   $('settingsNav').classList.toggle('active', settingsView);
   if (settingsView) { $('settingsSubnav').hidden = false; $('settingsNav').setAttribute('aria-expanded','true'); }
-  $('title').textContent = ({assets:'M\u00f3j sprz\u0119t',team:'Sprz\u0119t mojego zespo\u0142u',handover:'Zdanie sprz\u0119tu',permissions:'Moje uprawnienia',teamPermissions:'Uprawnienia mojego zespo\u0142u',reports:'Moje zgłoszenia',admin:'Administracja',access:'Dostep do portalu',settings:'Ustawienia - Jira',entra:'Ustawienia - Entra ID'})[name];
-  $('subtitle').textContent = ({assets:'Sprawdz przypisane elementy. Zglos sprzet, ktorego nie posiadasz.',team:'Zasoby bezposrednich i posrednich podwladnych.',handover:'Protok\u00f3\u0142 zdawczo-odbiorczy i zwrot sprz\u0119tu.',teamPermissions:'Dostepy bezposrednich i posrednich podwladnych.',permissions:'Przypisane dostepy do systemow i aplikacji.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.',access:'Zarzadzanie dostepem uzytkownikow i grup AD.',entra:'Polaczenie Microsoft Entra ID i dane organizacji.',settings:'Połączenie Jira, uprawnienia administratorów i zakres korekt.'})[name];
-  message(''); if (name === 'team') loadTeam(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'settings') loadSettings(); if (name === 'access') loadAccess();
+  $('title').textContent = ({assets:'M\u00f3j sprz\u0119t',team:'Sprz\u0119t mojego zespo\u0142u',handover:'Zdanie sprz\u0119tu',permissions:'Moje uprawnienia',teamPermissions:'Uprawnienia mojego zespo\u0142u',reports:'Moje zgłoszenia',admin:'Administracja',access:'Dostep do portalu',settings:'Ustawienia - Jira',deployment:'Aktualizacje',audit:'Logi audytu',entra:'Ustawienia - Entra ID'})[name];
+  $('subtitle').textContent = ({assets:'Sprawdz przypisane elementy. Zglos sprzet, ktorego nie posiadasz.',team:'Zasoby bezposrednich i posrednich podwladnych.',handover:'Protok\u00f3\u0142 zdawczo-odbiorczy i zwrot sprz\u0119tu.',teamPermissions:'Dostepy bezposrednich i posrednich podwladnych.',permissions:'Przypisane dostepy do systemow i aplikacji.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.',access:'Zarzadzanie dostepem uzytkownikow i grup AD.',entra:'Polaczenie Microsoft Entra ID i dane organizacji.',settings:'Połączenie Jira, uprawnienia administratorów i zakres korekt.',deployment:'Aktualizacja z GitHub oraz przywrocenie poprzedniej wersji.',audit:'Kto, kiedy i jaka operacje wykonal w portalu.'})[name];
+  message(''); if (name === 'team') loadTeam(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'settings') loadSettings(); if (name === 'deployment') loadDeployment(); if (name === 'audit') loadAudit(); if (name === 'access') loadAccess();
 }
 async function loadSettings() {
   try {
@@ -130,7 +130,7 @@ $('discoverWorkspace').onclick = async () => {
 };
 setupEquipmentFilters('asset','assetFilters',renderPersonalEquipment);
 function hideProtectedViews() {
-  for(const item of ['assets','team','handover','permissions','teamPermissions','reports','admin','settings','entra','access']) $(item+'View').hidden=true;
+  for(const item of ['assets','team','handover','permissions','teamPermissions','reports','admin','settings','deployment','audit','entra','access']) $(item+'View').hidden=true;
   $('adminNav').hidden=$('settingsGroup').hidden=true;
 }
 async function signIn() {
@@ -164,3 +164,81 @@ async function signIn() {
 }
 $('retryLogin').onclick=signIn;
 signIn();
+
+// Browser click events are supplemental telemetry, never form contents or secrets.
+function activeViewName() {
+  return document.querySelector('nav button[data-view].active')?.dataset.view || 'assets';
+}
+document.addEventListener('click', event => {
+  if (!me?.allowed || !me.csrf || !event.target?.closest) return;
+  const el = event.target.closest('button, a, summary, [role="button"]');
+  if (!el) return;
+  const target = el.id ? 'id:' + el.id
+    : el.dataset.view ? 'view:' + el.dataset.view
+    : el.dataset.decision ? 'decision:' + el.dataset.decision + '-' + String(el.dataset.id || '').replace(/[^0-9]/g, '')
+    : el.dataset.asset ? 'asset:' + String(el.dataset.asset).replace(/[^0-9]/g, '')
+    : el.dataset.teamAsset ? 'team-asset-report'
+    : el.closest('form')?.id ? 'form:' + el.closest('form').id : 'control';
+  if (!/^[a-zA-Z0-9_.:\-=]{1,120}$/.test(target)) return;
+  fetch(new URL('api/audit/click', appBase), {
+    method:'POST', credentials:'same-origin', keepalive:true,
+    headers:{'Content-Type':'application/json','X-CSRF-TOKEN':me.csrf},
+    body:JSON.stringify({target,view:activeViewName()})
+  }).catch(() => {});
+}, {capture:true});
+
+async function loadDeployment() {
+  try {
+    const state = await api('/api/admin/deployment');
+    $('deploymentVersion').textContent = state.currentVersion || 'Nieznana';
+    $('deploymentWorker').textContent = state.enabled ? 'Zainstalowany' : 'Brak - instalacja workera wymagana';
+    const last = state.last || {};
+    $('deploymentStatus').textContent = (last.state || 'Brak operacji') +
+      (last.action ? ' | ' + last.action : '') +
+      (last.updatedAtUtc ? ' | ' + new Date(last.updatedAtUtc).toLocaleString('pl-PL') : '') +
+      (last.message ? ' | ' + last.message : '');
+    $('deploymentUpdate').disabled = !state.enabled || state.busy;
+    $('deploymentRollback').disabled = !state.enabled || state.busy || state.currentVersion === 'local';
+  } catch(err) {
+    $('deploymentStatus').textContent = 'Blad odczytu statusu: ' + err.message;
+    $('deploymentUpdate').disabled = true;
+    $('deploymentRollback').disabled = true;
+  }
+}
+async function requestDeployment(action) {
+  const label = action === 'update' ? 'aktualizacje aplikacji z GitHub' : 'rollback do poprzedniego release';
+  if (!confirm('Zlecic ' + label + '? Portal moze byc chwilowo niedostepny.')) return;
+  $('deploymentUpdate').disabled = $('deploymentRollback').disabled = true;
+  try {
+    await api('/api/admin/deployment', {method:'POST',body:JSON.stringify({action})});
+    $('deploymentStatus').textContent = 'Zlecono: ' + label + '. Worker wykona operacje zgodnie z harmonogramem.';
+    await loadDeployment();
+  } catch(err) { $('deploymentStatus').textContent = err.message; await loadDeployment(); }
+}
+$('deploymentUpdate').addEventListener('click', () => requestDeployment('update'));
+$('deploymentRollback').addEventListener('click', () => requestDeployment('rollback'));
+$('refreshDeployment').addEventListener('click', loadDeployment);
+setInterval(() => {
+  if (me?.admin && !document.getElementById('deploymentView').hidden) loadDeployment();
+}, 15000);
+
+function auditQuery() {
+  const params = new URLSearchParams();
+  if ($('auditActor').value.trim()) params.set('actor', $('auditActor').value.trim());
+  if ($('auditAction').value.trim()) params.set('action', $('auditAction').value.trim());
+  params.set('since', new Date(Date.now()-Number($('auditRange').value)*86400000).toISOString());
+  return params.toString();
+}
+async function loadAudit() {
+  try {
+    const rows = await api('/api/admin/audit?' + auditQuery() + '&limit=500');
+    $('auditRows').innerHTML = !rows.length ? '<p class="empty">Brak wpisow.</p>' :
+      '<table class="equipmentTable"><thead><tr><th>UTC</th><th>Konto Windows</th><th>Zrodlo</th><th>Operacja</th><th>Cel</th><th>Wynik</th><th>IP</th></tr></thead><tbody>' +
+      rows.map(item => '<tr><td>'+escapeHtml(item.utc)+'</td><td>'+escapeHtml(item.actor)+'</td><td>'+escapeHtml(item.source)+'</td><td>'+escapeHtml(item.action)+'</td><td>'+escapeHtml(item.target)+'</td><td>'+escapeHtml(item.outcome)+'</td><td>'+escapeHtml(item.ip)+'</td></tr>').join('') +
+      '</tbody></table>';
+  } catch(err) { $('auditRows').textContent = 'Blad odczytu: '+err.message; }
+}
+$('auditRefresh').addEventListener('click', loadAudit);
+$('auditExport').addEventListener('click', () => {
+  window.location.href = new URL('api/admin/audit/export?' + auditQuery(), appBase).href;
+});

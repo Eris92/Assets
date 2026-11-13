@@ -1,5 +1,30 @@
 # Assets Portal
 
+## Web update and rollback
+
+Administrators can open Settings > Aktualizacje to queue a verified GitHub release
+or roll back the previous IIS release. Only fixed action names are accepted;
+no web-originated shell command, target directory or arbitrary script is executed.
+Install the worker once from elevated Windows PowerShell:
+
+    & 'C:\Sites\Assets\scripts\Install-DeploymentTask.ps1'
+
+The task runs as SYSTEM once per minute from a protected Program Files directory.
+It reads the fixed-schema request from ProgramData Assets and changes only Assets-KL.
+The app pool has no IIS admin rights. Failed executions are shown in the panel;
+if the site cannot start, use the protected Restore-Production.ps1 from console.
+Rollback changes binaries, not SQLite. Only existing verified release directories
+can be restored.
+
+## Audit log UI
+
+Settings > Logi audytu shows UTC time, Windows user, source, action, target,
+result and client socket IP, with filters and CSV export. All API requests are
+logged on the server. Clicks are separate, best-effort telemetry; form content,
+tokens and passwords are never sent as click data. The local retention is
+180 days. Ship these records off-host to SIEM for tamper-evident retention.
+
+
 ## Audit trail (180-day local retention)
 
 The SQLite PortalAudit table tracks every authenticated API request on the server,
