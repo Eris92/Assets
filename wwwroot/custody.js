@@ -38,6 +38,7 @@ function renderCustodyInbox(){
  pending.innerHTML=custodyManagerRows.length?custodyManagerRows.map(p=>{
    const age=Math.max(0,Math.floor((Date.now()-new Date(p.receivedAt).getTime())/86400000));
    return '<div class="protocol-row"><div><strong>ASSETS-'+p.id+'</strong> · '+p.items.length+' urzadzen'+
+    '<small>Odpowiedzialny: '+custEsc(p.manager)+'</small>'+
     '<small>Od '+age+' dni czeka na przekazanie odbiorcy.</small><small>'+
     p.items.map(x=>custEsc(x.key)).join(', ')+'</small></div>'+
     '<span class="badge '+(age>=7?'Rejected':'')+'">U kierownika</span></div>';

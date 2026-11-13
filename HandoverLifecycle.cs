@@ -220,6 +220,26 @@ internal sealed class HandoverLifecycle {
             rd.GetString(3),rd.GetString(4),rd.GetString(5),rd.GetString(6),rd.GetString(7)));
         return rows.ToArray();
     }
+    internal bool VerifyChain(long id) {
+        var events=Events(id);
+        if(events.Length==0)return false;
+        var last=new string('0',64);
+        foreach(var e in events) {
+            if(!e.PreviousHash.Equals(last,StringComparison.OrdinalIgnoreCase))
+                return false;
+            var canonical=JsonSerializer.Serialize(new {
+                protocolId=e.ProtocolId, stage=e.StageNumber,
+                action=e.Action, actor=e.Actor, time=e.Utc,
+                statement=e.Statement, ip=e.Ip, agent=e.UserAgent,
+                evidenceRef=e.EvidenceRef, previousHash=e.PreviousHash
+            });
+            var digest=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))
+                .ToLowerInvariant();
+            if(!digest.Equals(e.Hash,StringComparison.OrdinalIgnoreCase))return false;
+            last=e.Hash;
+        }
+        return true;
+    }
     internal HandoverEvidence[] Events(long id) {
         using var db=Open();using var cmd=db.CreateCommand();
         cmd.CommandText="""
@@ -263,24 +283,25 @@ internal sealed class HandoverLifecycle {
         });
         return rows.ToArray();
     }
-    internal object[] PendingWithManager(string actor) {
+    internal object[] PendingWithManager(string actor,bool operatorScope) {
         using var db=Open();using var cmd=db.CreateCommand();
         cmd.CommandText="""
-            SELECT p.Id,p.ItemsJson,s.ReceivedAt,s.Status
+            SELECT p.Id,p.ItemsJson,s.ReceivedAt,next.Status,s.ReceiverLogin
             FROM HandoverProtocols p
             JOIN HandoverStages s ON s.ProtocolId=p.Id AND s.StageNumber=1
             JOIN HandoverStages next ON next.ProtocolId=p.Id AND next.StageNumber=2
-            WHERE s.ReceiverLogin=$manager COLLATE NOCASE AND s.Status='Completed'
+            WHERE ($all=1 OR s.ReceiverLogin=$manager COLLATE NOCASE) AND s.Status='Completed'
               AND next.Status IN ('PendingDispatch','PendingReceipt','Disputed')
             ORDER BY p.Id DESC LIMIT 200
             """;
         cmd.Parameters.AddWithValue("$manager",actor);
+        cmd.Parameters.AddWithValue("$all",operatorScope?1:0);
         using var rd=cmd.ExecuteReader();
         var rows=new List<object>();
         while(rd.Read())rows.Add(new {
             id=rd.GetInt64(0),
             items=JsonSerializer.Deserialize<HandoverItem[]>(rd.GetString(1))??[],
-            receivedAt=rd.GetString(2),status=rd.GetString(3)
+            receivedAt=rd.GetString(2),status=rd.GetString(3),manager=rd.GetString(4)
         });
         return rows.ToArray();
     }

@@ -912,7 +912,7 @@ app.MapGet("/api/handover/inbox", (HttpContext ctx) => {
 });
 app.MapGet("/api/handover/pending-custody", (HttpContext ctx) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
-    return Results.Ok(custody.PendingWithManager(ctx.User.Identity.Name!));
+    return Results.Ok(custody.PendingWithManager(ctx.User.Identity.Name!,CanHandover(ctx.User)));
 });
 app.MapPost("/api/handover/protocols/{id:long}/stage/{stage:int}", async (
     HttpContext ctx, IAntiforgery anti, long id, int stage, HandoverActionInput input) => {
@@ -944,7 +944,7 @@ app.MapGet("/api/handover/protocols/{id:long}/evidence", (HttpContext ctx,long i
     return Results.Ok(new {
         protocolId=id, hashAlgorithm="SHA-256",
         warning="Local hash chain is audit evidence, not a qualified electronic signature or trusted timestamp.",
-        events=custody.Events(id),stages
+        chainValid=custody.VerifyChain(id),events=custody.Events(id),stages
     });
 });
 
