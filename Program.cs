@@ -119,6 +119,7 @@ var delegations = new TeamDelegations(ConnectionString());
 delegations.Initialize();
 var custody = new HandoverLifecycle(ConnectionString());
 custody.Initialize();
+var evidenceVault = new EvidenceVault(dataDirectory);
 var annualReviews = app.Services.GetRequiredService<AnnualReviewStore>();
 annualReviews.Initialize();
 var notifications = app.Services.GetRequiredService<PortalNotificationService>();
@@ -829,8 +830,8 @@ app.MapPost("/api/admin/reviews/manual", async (HttpContext ctx,IAntiforgery ant
     if(string.IsNullOrWhiteSpace(input.Login) || input.Login.Length>256 ||
        input.Year is <2025 or >2100)return Results.BadRequest();
     try {
-        // The file must be stored by a separate corporate archive; this form
-        // records its SHA-256 digest and archive locator, not a digital signature.
+        if(!evidenceVault.Exists(input.Sha256))
+            return Results.BadRequest(new {error="First upload a signed PDF to the evidence vault."});
         var person=await Task.Run(()=>HandoverDirectory.Resolve(input.Login),ctx.RequestAborted);
         var domain=ctx.User.Identity!.Name!.Split('\\')[0];
         var canonical=domain+"\\"+person.Login;
@@ -906,6 +907,40 @@ app.MapPost("/api/admin/notifications/test", async (HttpContext ctx,IAntiforgery
     }
 }).RequireRateLimiting("notifyTest");
 
+app.MapPost("/api/evidence", async (HttpContext ctx, IAntiforgery anti) => {
+    if(!CanHandover(ctx.User) && !IsAdmin(ctx.User)) return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    if(ctx.Request.ContentType is null ||
+        !ctx.Request.ContentType.StartsWith("multipart/form-data",StringComparison.OrdinalIgnoreCase))
+        return Results.BadRequest(new{error="Expected multipart/form-data with PDF field 'file'"});
+    if(ctx.Request.ContentLength is > 12_000_000)
+        return Results.Problem("File is too large",statusCode:413);
+    try {
+        var form=await ctx.Request.ReadFormAsync(ctx.RequestAborted);
+        var file=form.Files.GetFile("file");
+        if(file is null)return Results.BadRequest(new{error="Missing PDF field 'file'"});
+        var result=await evidenceVault.Save(file,ctx.User.Identity?.Name??"",ctx.RequestAborted);
+        audit.Write(ctx.User.Identity?.Name??"","Server","Evidence.Upload",
+            result.Sha256,"Archived",
+            ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,201);
+        return Results.Created("/api/evidence/"+result.Sha256,result);
+    } catch(ArgumentException ex) {
+        return Results.BadRequest(new{error=ex.Message});
+    } catch(Exception ex) {
+        app.Logger.LogError(ex,"Evidence archive upload failed");
+        return Results.Problem("Nie mozna bezpiecznie zapisac podpisanego PDF.",statusCode:502);
+    }
+}).RequireRateLimiting("handoverSearch");
+app.MapGet("/api/evidence/{sha}", (HttpContext ctx,string sha) => {
+    if(!CanHandover(ctx.User)&&!IsAdmin(ctx.User)) return AuthError(ctx);
+    if(!evidenceVault.Exists(sha))return Results.NotFound();
+    ctx.Response.Headers.CacheControl="no-store";
+    ctx.Response.Headers.XContentTypeOptions="nosniff";
+    ctx.Response.Headers.ContentSecurityPolicy="sandbox";
+    return Results.File(evidenceVault.GetPath(sha),
+        "application/pdf","Assets-evidence-"+sha.ToLowerInvariant()+".pdf");
+});
+
 app.MapGet("/api/handover/inbox", (HttpContext ctx) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     return Results.Ok(custody.Inbox(ctx.User.Identity.Name!,CanHandover(ctx.User)));
@@ -921,6 +956,8 @@ app.MapPost("/api/handover/protocols/{id:long}/stage/{stage:int}", async (
     if (!input.Confirmed) return Results.BadRequest(new { error = "Explicit confirmation required" });
     if (stage is < 1 or > 2) return Results.BadRequest();
     try {
+        if(input.Action=="manual" && !evidenceVault.Exists(input.EvidenceSha256))
+            return Results.BadRequest(new {error="Archived PDF evidence not found. Upload the signed protocol first."});
         custody.Change(id,stage,input.Action,ctx.User.Identity.Name!,CanHandover(ctx.User),
             ctx.Connection.RemoteIpAddress?.ToString()??"",
             ctx.Request.Headers.UserAgent.ToString(),input.EvidenceSha256??"");
