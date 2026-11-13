@@ -8,6 +8,9 @@ $pending = Join-Path $queue 'pending.json'
 $processing = Join-Path $queue 'processing.json'
 $statusPath = Join-Path $queue 'status.json'
 if (-not (Test-Path -LiteralPath $pending -PathType Leaf)) { return }
+if (-not (Get-ScheduledTask -TaskName 'AssetsWeb-Production-Updates' -ErrorAction SilentlyContinue)) {
+    throw 'Authorized scheduled task is missing.'
+}
 if (Test-Path -LiteralPath $processing) { throw 'Unresolved interrupted request: processing.json. Reconcile before retry.' }
 try { Move-Item -LiteralPath $pending -Destination $processing -ErrorAction Stop }
 catch { return }

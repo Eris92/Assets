@@ -29,8 +29,8 @@ $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowe
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -StartWhenAvailable
-Register-ScheduledTask -TaskName 'Production-Updates' -TaskPath '\Assets-Web\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Fixed-actions Assets GitHub Release update or rollback' -Force | Out-Null
+Register-ScheduledTask -TaskName 'AssetsWeb-Production-Updates' -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Fixed-actions Assets GitHub Release update or rollback' -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $queue 'enabled.flag'), 'v1', (New-Object Text.UTF8Encoding($false)))
-Write-Host 'Installed task: \Assets-Web\Production-Updates (SYSTEM, once per minute).'
+Write-Host 'Installed task: \AssetsWeb-Production-Updates (SYSTEM, once per minute).'
 Write-Host "Queue: $queue"
 Write-Host "Protected worker scripts: $protected"
