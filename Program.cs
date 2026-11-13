@@ -48,7 +48,15 @@ using (var db = new SqliteConnection(ConnectionString())) {
         CREATE TABLE IF NOT EXISTS Settings (Key TEXT PRIMARY KEY, Value TEXT NOT NULL);
         """;
     cmd.ExecuteNonQuery();
-    foreach (var column in new[] { "Type TEXT NOT NULL DEFAULT 'attribute'", "AffectedEmployee TEXT NOT NULL DEFAULT ''" }) {
+    foreach (var column in new[] {
+        "Type TEXT NOT NULL DEFAULT 'attribute'",
+        "AffectedEmployee TEXT NOT NULL DEFAULT ''",
+        "SourceSnapshot TEXT NOT NULL DEFAULT ''",
+        "JiraAuditState TEXT NOT NULL DEFAULT 'None'",
+        "JiraCommentId TEXT NOT NULL DEFAULT ''",
+        "JiraAuditError TEXT NOT NULL DEFAULT ''",
+        "AppliedAt TEXT NOT NULL DEFAULT ''"
+    }) {
         using var probe = db.CreateCommand();
         probe.CommandText = "SELECT name FROM pragma_table_info('Reports') WHERE name=$name";
         probe.Parameters.AddWithValue("$name", column.Split(' ')[0]);
@@ -132,8 +140,7 @@ async Task<JsonNode> Jira(HttpMethod method, string path, object? body = null) {
     if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"Jira HTTP {(int)response.StatusCode}: {content[..Math.Min(content.Length, 300)]}");
     return JsonNode.Parse(content) ?? throw new InvalidOperationException("Empty Jira response");
 }
-string AttributeValue(JsonNode? attribute) => string.Join(", ", (attribute?["objectAttributeValues"]?.AsArray() ?? new JsonArray())
-    .Select(v => v?["displayValue"]?.ToString() ?? v?["value"]?.ToString() ?? ""));
+string AttributeValue(JsonNode? attribute) => JiraAssetWorkflow.AttributeText(attribute);
 JsonNode? Attribute(JsonNode obj, string id) => obj["attributes"]?.AsArray().FirstOrDefault(a => a?["objectTypeAttributeId"]?.ToString() == id);
 object ProjectObject(JsonNode obj) => new {
     id = obj["id"]?.ToString(), key = obj["objectKey"]?.ToString(), name = obj["name"]?.ToString(), type = obj["objectType"]?["name"]?.ToString(),
@@ -209,11 +216,30 @@ async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
     if (string.IsNullOrWhiteSpace(aql)) throw new InvalidOperationException("Jira AQL is not configured");
     var entries = new List<JsonNode>();
     for (var page = 1; page <= 100; page++) {
-        var result = await Jira(HttpMethod.Post, $"object/aql?startAt={entries.Count}&maxResults=100&includeAttributes=true", new { qlQuery = aql });
-        var batch = result["values"]?.AsArray() ?? result["objectEntries"]?.AsArray() ?? result["results"]?["objectEntries"]?.AsArray() ?? new JsonArray();
-        entries.AddRange(batch.OfType<JsonNode>());
-        var total = result["total"]?.GetValue<int>() ?? result["totalFilterCount"]?.GetValue<int>();
-        if (batch.Count == 0 || (total.HasValue && entries.Count >= total.Value) || (!total.HasValue && batch.Count < 100)) return entries;
+        const int pageSize = 100;
+        var result = await Jira(HttpMethod.Post, $"object/aql?startAt={entries.Count}&maxResults={pageSize}&includeAttributes=true", new { qlQuery = aql });
+        var batch = JiraAssetWorkflow.Entries(result);
+        // Jira may return attribute names separately in objectTypeAttributes.
+        var definitions = result["objectTypeAttributes"] as JsonArray ??
+                          result["results"]?["objectTypeAttributes"] as JsonArray;
+        if (definitions is not null) {
+            var names = definitions.Where(d => d is not null)
+                .Select(d => (Id: d?["id"]?.ToString(), Name: d?["name"]?.ToString()))
+                .Where(x => !string.IsNullOrWhiteSpace(x.Id) && !string.IsNullOrWhiteSpace(x.Name))
+                .ToDictionary(x => x.Id!, x => x.Name!, StringComparer.Ordinal);
+            foreach (var entry in batch) {
+                foreach (var attribute in entry?["attributes"] as JsonArray ?? new JsonArray()) {
+                    var id = attribute?["objectTypeAttributeId"]?.ToString();
+                    if (id is null || !names.TryGetValue(id, out var name) || attribute is not JsonObject item) continue;
+                    if (item["objectTypeAttribute"] is not JsonObject definition) {
+                        definition = new JsonObject(); item["objectTypeAttribute"] = definition;
+                    }
+                    definition["name"] = name;
+                }
+            }
+        }
+        entries.AddRange(batch.OfType<JsonNode>().Select(x => x.DeepClone()));
+        if (!JiraAssetWorkflow.HasMore(result, entries.Count - batch.Count, batch.Count, pageSize)) return entries;
     }
     throw new InvalidOperationException("Asset query limit reached; narrow the configured AQL");
 }
@@ -445,13 +471,14 @@ app.MapPost("/api/reports", async (HttpContext ctx, IAntiforgery anti, ReportInp
         if (attr is null) return Results.BadRequest(new { error = "Attribute missing" });
         using var db = new SqliteConnection(ConnectionString()); db.Open();
         using var cmd = db.CreateCommand();
-        cmd.CommandText = "INSERT INTO Reports(Source,ObjectId,ObjectKey,ObjectName,AttributeId,AttributeName,OldValue,ProposedValue,Reason,Reporter,CreatedAt,Status,Type,AffectedEmployee) VALUES ('Jira', $oid,$key,$name,$aid,$aname,$old,$new,$reason,$user,$at,'Pending',$type,$employee)";
+        cmd.CommandText = "INSERT INTO Reports(Source,ObjectId,ObjectKey,ObjectName,AttributeId,AttributeName,OldValue,ProposedValue,Reason,Reporter,CreatedAt,Status,Type,AffectedEmployee,SourceSnapshot) VALUES ('Jira', $oid,$key,$name,$aid,$aname,$old,$new,$reason,$user,$at,'Pending',$type,$employee,$snapshot)";
         cmd.Parameters.AddWithValue("$oid", input.ObjectId);
         cmd.Parameters.AddWithValue("$key", obj["objectKey"]?.ToString() ?? "");
         cmd.Parameters.AddWithValue("$name", obj["name"]?.ToString() ?? "");
         cmd.Parameters.AddWithValue("$aid", attributeId);
         cmd.Parameters.AddWithValue("$aname", attr["objectTypeAttribute"]?["name"]?.ToString() ?? attributeId);
         cmd.Parameters.AddWithValue("$old", AttributeValue(attr));
+        cmd.Parameters.AddWithValue("$snapshot", JiraAssetWorkflow.AttributeFingerprint(attr));
         cmd.Parameters.AddWithValue("$new", type == "attribute" ? input.ProposedValue!.Trim() : "");
         cmd.Parameters.AddWithValue("$type", type);
         cmd.Parameters.AddWithValue("$employee", employees.FirstOrDefault()?.Name ?? "");
@@ -476,41 +503,144 @@ app.MapGet("/api/reports", (HttpContext ctx) => {
     if (!IsAdmin(ctx.User)) cmd.Parameters.AddWithValue("$user", ctx.User.Identity.Name!);
     using var reader = cmd.ExecuteReader();
     var rows = new List<object>();
-    while (reader.Read()) rows.Add(new { id = reader.GetInt64(0), source = reader.GetString(1), objectId = reader.GetString(2), key = reader.GetString(3), name = reader.GetString(4), attributeId = reader.GetString(5), attribute = reader.GetString(6), oldValue = reader.GetString(7), proposedValue = reader.GetString(8), reason = reader.GetString(9), reporter = reader.GetString(10), createdAt = reader.GetString(11), status = reader.GetString(12), decidedBy = reader.IsDBNull(13) ? null : reader.GetString(13), decidedAt = reader.IsDBNull(14) ? null : reader.GetString(14), error = reader.IsDBNull(15) ? null : reader.GetString(15), type = reader.GetString(reader.GetOrdinal("Type")), affectedEmployee = reader.GetString(reader.GetOrdinal("AffectedEmployee")) });
+    while (reader.Read()) rows.Add(new { id = reader.GetInt64(0), source = reader.GetString(1), objectId = reader.GetString(2), key = reader.GetString(3), name = reader.GetString(4), attributeId = reader.GetString(5), attribute = reader.GetString(6), oldValue = reader.GetString(7), proposedValue = reader.GetString(8), reason = reader.GetString(9), reporter = reader.GetString(10), createdAt = reader.GetString(11), status = reader.GetString(12), decidedBy = reader.IsDBNull(13) ? null : reader.GetString(13), decidedAt = reader.IsDBNull(14) ? null : reader.GetString(14), error = reader.IsDBNull(15) ? null : reader.GetString(15), type = reader.GetString(reader.GetOrdinal("Type")), affectedEmployee = reader.GetString(reader.GetOrdinal("AffectedEmployee")),
+        jiraAuditState = reader.GetString(reader.GetOrdinal("JiraAuditState")),
+        jiraCommentId = reader.GetString(reader.GetOrdinal("JiraCommentId")),
+        jiraAuditError = reader.GetString(reader.GetOrdinal("JiraAuditError")),
+        appliedAt = reader.GetString(reader.GetOrdinal("AppliedAt")) });
     return Results.Ok(rows);
 });
+
+// The Cloud Assets comment endpoint is also used by MC-SIRK. Its request is
+// non-idempotent: after a timeout, never automatically replay the comment.
+async Task<string> PostJiraAuditComment(long objectId, string html, CancellationToken cancellationToken) {
+    var workspaceId = Setting("WorkspaceId", "Jira:WorkspaceId");
+    if (!Guid.TryParse(workspaceId, out var guid))
+        throw new InvalidOperationException("Jira WorkspaceId is not configured");
+    using var request = new HttpRequestMessage(HttpMethod.Post,
+        $"https://api.atlassian.com/jsm/assets/workspace/{guid:D}/v1/comment/create");
+    request.Headers.Authorization = JiraAuthorization();
+    request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+    request.Content = JsonContent.Create(new { objectId, comment = html, role = 0 });
+    using var client = app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("jira");
+    using var response = await client.SendAsync(request, cancellationToken);
+    if (!response.IsSuccessStatusCode)
+        throw new InvalidOperationException($"Jira Assets comment HTTP {(int)response.StatusCode}");
+    var payload = await response.Content.ReadFromJsonAsync<JsonNode>(cancellationToken: cancellationToken);
+    var commentId = payload?["id"]?.ToString();
+    if (string.IsNullOrWhiteSpace(commentId))
+        throw new InvalidOperationException("Jira Assets did not confirm the comment ID");
+    return commentId;
+}
 
 app.MapPost("/api/reports/{id:long}/decision", async (HttpContext ctx, IAntiforgery anti, long id, DecisionInput input) => {
     if (!IsAdmin(ctx.User)) return AuthError(ctx);
     await anti.ValidateRequestAsync(ctx);
     if (input.Action is not ("approve" or "reject")) return Results.BadRequest();
     using var db = new SqliteConnection(ConnectionString()); db.Open();
-    using var transaction = db.BeginTransaction();
-    using var select = db.CreateCommand(); select.Transaction = transaction;
-    select.CommandText = "SELECT ObjectId,AttributeId,OldValue,ProposedValue,Status,Type FROM Reports WHERE Id=$id";
+    using var select = db.CreateCommand();
+    select.CommandText = "SELECT ObjectId,AttributeId,OldValue,ProposedValue,Status,Type,SourceSnapshot,ObjectKey,AttributeName,Reason,Reporter FROM Reports WHERE Id=$id";
     select.Parameters.AddWithValue("$id", id);
     using var reader = select.ExecuteReader();
     if (!reader.Read()) return Results.NotFound();
-    var objectId = reader.GetString(0); var attributeId = reader.GetString(1); var oldValue = reader.GetString(2); var proposed = reader.GetString(3); var status = reader.GetString(4); var reportType = reader.GetString(5);
+    var objectId = reader.GetString(0);
+    var attributeId = reader.GetString(1);
+    var oldValue = reader.GetString(2);
+    var proposed = reader.GetString(3);
+    var status = reader.GetString(4);
+    var reportType = reader.GetString(5);
+    var snapshot = reader.GetString(6);
+    var objectKey = reader.GetString(7);
+    var attributeName = reader.GetString(8);
+    var reason = reader.GetString(9);
+    var reporter = reader.GetString(10);
     reader.Close();
-    if (status != "Pending") return Results.Conflict(new { error = "Already processed" });
-    if (input.Action == "approve") {
-        try {
-            var obj = await Jira(HttpMethod.Get, $"object/{objectId}");
-            if (AttributeValue(Attribute(obj, attributeId)) != oldValue) return Results.Conflict(new { error = "Source changed since report; review again" });
-            var typeId = obj["objectType"]?["id"]?.ToString() ?? obj["objectTypeId"]?.ToString();
-            if (string.IsNullOrEmpty(typeId)) throw new InvalidOperationException("Object type missing");
-            await Jira(HttpMethod.Put, $"object/{objectId}", new { objectTypeId = typeId, attributes = new[] { new { objectTypeAttributeId = attributeId, objectAttributeValues = reportType == "attribute" ? new object[] { new { value = proposed } } : Array.Empty<object>() } } });
-        } catch (Exception ex) { app.Logger.LogError(ex, "Correction failed for report {Id}", id); return Results.Problem("Korekta w Jira nie powiodla sie; zgloszenie nadal oczekuje.", statusCode: 502); }
+    if (status != "Pending") return Results.Conflict(new { error = $"Report is {status}; no replay is permitted" });
+    var actor = ctx.User.Identity!.Name!;
+    var timestamp = DateTimeOffset.UtcNow.ToString("O");
+    using (var claim = db.CreateCommand()) {
+        claim.CommandText = "UPDATE Reports SET Status=$status,DecidedBy=$by,DecidedAt=$at WHERE Id=$id AND Status='Pending'";
+        claim.Parameters.AddWithValue("$status", input.Action == "approve" ? "Applying" : "Rejected");
+        claim.Parameters.AddWithValue("$by", actor);
+        claim.Parameters.AddWithValue("$at", timestamp);
+        claim.Parameters.AddWithValue("$id", id);
+        if (claim.ExecuteNonQuery() != 1) return Results.Conflict(new { error = "Report processed concurrently" });
     }
-    using var update = db.CreateCommand(); update.Transaction = transaction;
-    update.CommandText = "UPDATE Reports SET Status=$status,DecidedBy=$by,DecidedAt=$at WHERE Id=$id AND Status='Pending'";
-    update.Parameters.AddWithValue("$status", input.Action == "approve" ? "Approved" : "Rejected");
-    update.Parameters.AddWithValue("$by", ctx.User.Identity!.Name!);
-    update.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("O"));
-    update.Parameters.AddWithValue("$id", id);
-    update.ExecuteNonQuery(); transaction.Commit();
-    return Results.Ok();
+    void Persist(string nextStatus, string auditState, string? commentId = null, string? error = null, bool applied = false) {
+        using var update = db.CreateCommand();
+        update.CommandText = "UPDATE Reports SET Status=$status,JiraAuditState=$audit,JiraCommentId=$comment,JiraAuditError=$error,AppliedAt=CASE WHEN $applied=1 THEN $at ELSE AppliedAt END WHERE Id=$id";
+        update.Parameters.AddWithValue("$status", nextStatus);
+        update.Parameters.AddWithValue("$audit", auditState);
+        update.Parameters.AddWithValue("$comment", commentId ?? "");
+        update.Parameters.AddWithValue("$error", error ?? "");
+        update.Parameters.AddWithValue("$applied", applied ? 1 : 0);
+        update.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("O"));
+        update.Parameters.AddWithValue("$id", id);
+        update.ExecuteNonQuery();
+    }
+    if (input.Action == "reject") {
+        app.Logger.LogInformation("Report {ReportId} rejected by {Actor}", id, actor);
+        return Results.Ok(new { status = "Rejected" });
+    }
+    var writeStarted = false;
+    try {
+        if (!long.TryParse(objectId, out var objectNumber) || objectNumber <= 0)
+            throw new InvalidOperationException("Invalid Jira object ID");
+        var obj = await Jira(HttpMethod.Get, $"object/{objectId}");
+        var attribute = Attribute(obj, attributeId);
+        if (attribute is null) {
+            Persist("Pending", "None");
+            return Results.Conflict(new { error = "Jira attribute no longer exists; review report" });
+        }
+        var matches = !string.IsNullOrEmpty(snapshot)
+            ? JiraAssetWorkflow.AttributeFingerprint(attribute) == snapshot
+            : AttributeValue(attribute) == oldValue;
+        if (!matches) {
+            Persist("Pending", "None");
+            return Results.Conflict(new { error = "Jira source changed since report; create a new report" });
+        }
+        // Owner removal is destructive if multiple references exist.
+        if (reportType != "attribute" && JiraAssetWorkflow.ValueCount(attribute) != 1) {
+            Persist("Pending", "None");
+            return Results.Conflict(new { error = "Multiple or missing owner references; manual review required" });
+        }
+        var typeId = obj["objectType"]?["id"]?.ToString() ?? obj["objectTypeId"]?.ToString();
+        if (string.IsNullOrEmpty(typeId)) throw new InvalidOperationException("Object type missing");
+        var values = reportType == "attribute"
+            ? new object[] { new { value = proposed } }
+            : Array.Empty<object>();
+        // A timeout after this point is ambiguous. Never auto-retry a PUT.
+        writeStarted = true;
+        await Jira(HttpMethod.Put, $"object/{objectId}", new {
+            objectTypeId = typeId,
+            attributes = new[] { new { objectTypeAttributeId = attributeId, objectAttributeValues = values } }
+        });
+        var reloaded = await Jira(HttpMethod.Get, $"object/{objectId}");
+        if (!JiraAssetWorkflow.IsVerified(Attribute(reloaded, attributeId), reportType, proposed))
+            throw new InvalidOperationException("Jira accepted PUT but read-back verification failed");
+        // Durable barrier: the attribute update was verified and will never be replayed.
+        Persist("AppliedAuditPending", "Pending", applied: true);
+        var commentHtml = JiraAssetWorkflow.AuditComment(id, objectKey, attributeName,
+            oldValue, proposed, reason, reporter, actor, reportType);
+        try {
+            var commentId = await PostJiraAuditComment(objectNumber, commentHtml, ctx.RequestAborted);
+            Persist("Approved", "Posted", commentId: commentId, applied: true);
+            app.Logger.LogInformation("Jira correction and comment completed for report {Id}: {CommentId}", id, commentId);
+            return Results.Ok(new { status = "Approved", jiraCommentId = commentId });
+        } catch (Exception commentError) {
+            app.Logger.LogError(commentError, "Jira updated but audit comment failed for report {Id}", id);
+            Persist("AppliedAuditPending", "Pending", error: "Jira comment was not confirmed. Verify comment manually before retry.", applied: true);
+            return Results.Problem("Jira change applied and verified, but audit comment was not confirmed. Do not approve again; inspect the report.", statusCode: 502);
+        }
+    } catch (Exception ex) {
+        app.Logger.LogError(ex, "Jira correction failed for report {Id}, writeStarted={WriteStarted}", id, writeStarted);
+        if (writeStarted) {
+            Persist("NeedsReview", "Review", error: "Remote PUT result is ambiguous or verification failed; manual reconciliation required.");
+            return Results.Problem("Jira update result needs manual review. No automatic retry was performed.", statusCode: 502);
+        }
+        Persist("Pending", "None", error: "Preflight failed; no Jira write attempted.");
+        return Results.Problem("Jira preflight failed; no changes were made.", statusCode: 502);
+    }
 });
 
 app.Run();

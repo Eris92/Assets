@@ -50,9 +50,9 @@ async function loadAssets() {
     renderPersonalEquipment();
   } catch(e) { $('assets').innerHTML = `<p class="empty">Nie udało się pobrać zasobów. ${escapeHtml(e.message)}</p>`; }
 }
-function statusName(s) { return ({Pending:'Oczekuje',Approved:'Zatwierdzone',Rejected:'Odrzucone'})[s] || s; }
+function statusName(s) { return ({Pending:'Oczekuje',Applying:'W trakcie',Approved:'Zatwierdzone',Rejected:'Odrzucone',AppliedAuditPending:'Zmieniono w Jira - komentarz do weryfikacji',NeedsReview:'Wymagana weryfikacja Jira'})[s] || s; }
 function reportRow(r, admin) {
-  return `<article class="row"><div><h3>${escapeHtml(r.name)} <span class="key">${escapeHtml(r.key)}</span></h3><p><strong>${escapeHtml(({ 'not-held':'Nie posiadam tego sprzetu', 'employee-left':'Pracownik juz nie pracuje', assignment:'Nieprawidlowe przypisanie sprzetu' })[r.type] || r.attribute)}:</strong> ${escapeHtml(r.oldValue)} → ${escapeHtml(r.proposedValue)}</p><p>${escapeHtml(r.reason)}</p><p class="meta">${escapeHtml(r.reporter)}${r.affectedEmployee ? ' · Pracownik: ' + escapeHtml(r.affectedEmployee) : ''} · ${escapeHtml(new Date(r.createdAt).toLocaleString('pl-PL'))} · ${escapeHtml(r.source)}</p></div>${admin && r.status === 'Pending' ? `<div class="decision"><button data-decision="approve" data-id="${r.id}">Zatwierdź</button><button class="reject" data-decision="reject" data-id="${r.id}">Odrzuć</button></div>` : `<span class="badge ${escapeHtml(r.status)}">${escapeHtml(statusName(r.status))}</span>`}</article>`;
+  return `<article class="row"><div><h3>${escapeHtml(r.name)} <span class="key">${escapeHtml(r.key)}</span></h3><p><strong>${escapeHtml(({ 'not-held':'Nie posiadam tego sprzetu', 'employee-left':'Pracownik juz nie pracuje', assignment:'Nieprawidlowe przypisanie sprzetu' })[r.type] || r.attribute)}:</strong> ${escapeHtml(r.oldValue)} → ${escapeHtml(r.proposedValue)}</p><p>${escapeHtml(r.reason)}</p><p class="meta">${escapeHtml(r.reporter)}${r.affectedEmployee ? ' · Pracownik: ' + escapeHtml(r.affectedEmployee) : ''} · ${escapeHtml(new Date(r.createdAt).toLocaleString('pl-PL'))} · ${escapeHtml(r.source)}</p>${r.jiraCommentId ? `<p class="meta">Jira comment ID: ${escapeHtml(r.jiraCommentId)}</p>` : ''}${r.jiraAuditError ? `<p class="meta">Uwaga: ${escapeHtml(r.jiraAuditError)}</p>` : ''}</div>${admin && r.status === 'Pending' ? `<div class="decision"><button data-decision="approve" data-id="${r.id}">Zatwierdź</button><button class="reject" data-decision="reject" data-id="${r.id}">Odrzuć</button></div>` : `<span class="badge ${escapeHtml(r.status)}">${escapeHtml(statusName(r.status))}</span>`}</article>`;
 }
 async function loadReports() {
   try {
@@ -105,7 +105,7 @@ $('reportForm').addEventListener('submit', async e => {
 $('adminReports').addEventListener('click', async e => {
   const b = e.target.closest('[data-decision]'); if (!b) return;
   const action = b.dataset.decision; if (!confirm(action === 'approve' ? 'Zatwierdzic zgloszenie i zapisac zmiane w Jira?' : 'Odrzucić zgłoszenie?')) return;
-  b.disabled = true; try { await api(`/api/reports/${b.dataset.id}/decision`,{method:'POST',body:JSON.stringify({action})}); await loadReports(); await loadAssets(); await loadTeam(true); message('Decyzja została zapisana.'); } catch(err) { message(err.message,true); b.disabled = false; }
+  b.disabled = true; try { await api(`/api/reports/${b.dataset.id}/decision`,{method:'POST',body:JSON.stringify({action})}); await loadReports(); await loadAssets(); await loadTeam(true); message('Decyzja została zapisana.'); } catch(err) { await loadReports(); message(err.message,true); b.disabled = false; }
 });
 $('refresh').onclick = loadAssets; $('refreshAdmin').onclick = loadReports;
 $('settingsForm').addEventListener('submit', async e => {

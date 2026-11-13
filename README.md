@@ -1,5 +1,35 @@
 # Assets Portal
 
+## Jira Assets read/write and audit (MC-SIRK parity)
+
+This integration reuses the MC-SIRK change sequence, not its MeshCentral code: AQL
+pages are read until the API reports EOF (including when totalFilterCount is capped),
+attributes keep resolved names and references, and correction approval performs:
+read object + compare persisted value snapshot -> single Jira PUT -> GET read-back
+verification -> durable AppliedAuditPending state -> Jira Assets audit comment.
+
+The Jira comment is created with the technical Jira account at
+https://api.atlassian.com/jsm/assets/workspace/{workspaceId}/v1/comment/create
+and carries the Assets report ID, original/new value, reported-by and approved-by.
+The comment's author in Jira will be the technical account. The actor and requester
+are recorded explicitly in the comment text and local SQLite audit.
+
+Statuses:
+- Pending: not processed; can approve/reject
+- Applying: operation claimed, no concurrent approval permitted
+- Approved: change and audit comment confirmed by Jira (comment ID saved)
+- AppliedAuditPending: Jira PUT was verified, but comment was not confirmed;
+  DO NOT reapply PUT or automatically retry a non-idempotent comment
+- NeedsReview: Jira PUT was initiated but result/read-back is ambiguous; reconcile
+  manually in Jira before any further action
+
+The application never silently removes multiple owner references. New reports
+retain stable attribute value snapshots to detect concurrent Jira changes. Older
+pending reports without snapshots still require old displayed values to match.
+Never delete Data Protection keys or SQLite while deploying. A 502 after PUT does
+not necessarily mean the Jira object is unchanged: inspect report status.
+
+
 ## Windows identity, DPAPI, and Jira owner matching
 
 The working 7z package used a Jira AQL reference constraint on `Osoba_odpowiedzialna."Email Address"`. The new `/api/assets` endpoint reconstructs that constraint from the **authenticated Windows login** and `Jira:UserEmailDomain`. When `UserEmailDomain` is absent, it falls back to the domain part of the configured Jira account email, then to the Windows server's AD DNS domain if the older Jira:BaseUrl/Token configuration is used. A Windows identity containing a complete UPN uses its own domain. The principal is never taken from an untrusted URL or request body. Login/derived email must pass strict validation before inclusion in AQL.
