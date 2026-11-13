@@ -18,6 +18,18 @@
   <div class="toolbar"><h2>Coroczny spis z natury i przeglad uprawnien</h2><button class="secondary" id="annualReviewRefresh">Odswiez</button></div>
   <p class="handoverNotice">Potwierdzenie elektroniczne zapisuje Windows SSO, czas UTC i skrót SHA-256 sprawdzonych danych. Nie jest podpisem kwalifikowanym. Gdy dane sa niezgodne, wybierz "Zglos niezgodnosc" i dokonaj korekty.</p>
   <div id="annualReviewRows"><p class="empty">Pobieranie przegladow rocznych...</p></div>
+<details id="manualReviewPanel" class="settingsCard" style="margin-top:18px" hidden>
+ <summary><strong>Administrator: potwierdzenie papierowe</strong></summary>
+ <p class="meta">Wymagany podpisany protokol PDF, archiwizowany na serwerze i identyfikowany SHA-256. Zapis nie jest automatycznym kwalifikowanym podpisem elektronicznym.</p>
+ <form id="manualReviewForm">
+ <div class="settingsGrid">
+  <label>Pracownik (login AD)<input id="manualReviewLogin" required placeholder="DOMAIN\\login"></label>
+  <label>Rok<input type="number" id="manualReviewYear" min="2025" max="2100" required></label>
+  <label>Rodzaj<select id="manualReviewKind"><option value="assets">Spis z natury</option><option value="permissions">Przeglad uprawnien</option></select></label>
+  <label>Podpisany dokument PDF<input id="manualReviewPdf" type="file" accept=".pdf,application/pdf" required></label>
+ </div><div class="actions"><button type="submit" id="manualReviewSubmit" class="primary">Archiwizuj podpisany przeglad</button></div>
+ </form>
+</details>
 </section>
 <section id="custodyInboxView" hidden>
   <div class="toolbar"><h2>Odbiory, wydania i sprzet nierozliczony</h2><button class="secondary" id="custodyRefresh">Odswiez</button></div>

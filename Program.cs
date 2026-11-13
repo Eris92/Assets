@@ -835,6 +835,7 @@ app.MapPost("/api/admin/reviews/manual", async (HttpContext ctx,IAntiforgery ant
         var person=await Task.Run(()=>HandoverDirectory.Resolve(input.Login),ctx.RequestAborted);
         var domain=ctx.User.Identity!.Name!.Split('\\')[0];
         var canonical=domain+"\\"+person.Login;
+        annualReviews.Ensure(canonical,key=>Setting(key,"Reviews:"+key));
         var result=annualReviews.Manual(canonical,input.Kind,input.Year,
             input.Sha256,input.EvidenceReference,ctx.User.Identity.Name!);
         audit.Write(ctx.User.Identity.Name!,"Server","Review.Manual",

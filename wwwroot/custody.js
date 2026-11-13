@@ -1,3 +1,32 @@
+// Archived paper evidence is uploaded before manual confirmation.
+// The backend computes SHA-256 from stored PDF bytes (never trust a client hash).
+async function uploadEvidencePdf(file){
+  if(!file){
+    file=await new Promise(resolve=>{
+      const chooser=document.createElement('input');
+      chooser.type='file';chooser.accept='application/pdf,.pdf';
+      chooser.style.display='none';document.body.appendChild(chooser);
+      chooser.addEventListener('change',()=>{
+        const selected=chooser.files?.[0]||null;chooser.remove();resolve(selected);
+      },{once:true});
+      chooser.click();
+    });
+  }
+  if(!file)return null;
+  if(file.size>10*1024*1024||file.size<5)
+    throw new Error('Wybierz podpisany plik PDF do 10 MB.');
+  const form=new FormData();form.append('file',file,file.name);
+  const response=await fetch(new URL('api/evidence',appBase),{
+    method:'POST',credentials:'same-origin',
+    headers:{'X-CSRF-TOKEN':me?.csrf||''},body:form
+  });
+  if(!response.ok){
+    let detail;try{const result=await response.json();detail=result.detail||result.error}catch{}
+    throw new Error(detail||'Nie udalo sie zapisac PDF: HTTP '+response.status);
+  }
+  return await response.json();
+}
+
 // Individual physical custody confirmation. Never classify these actions as QES.
 let custodyRows=[],custodyManagerRows=[];
 const custEsc=x=>escapeHtml(x??'');
@@ -67,10 +96,11 @@ document.addEventListener('click',async event=>{
  if(!row||!custAllowed(row,action))return;
  let evidenceSha256='';
  if(action==='manual'){
-  evidenceSha256=prompt('Wprowadz SHA-256 papierowego protokolu przechowywanego w firmowym archiwum (64 znaki HEX):','')||'';
-  if(!/^[a-fA-F0-9]{64}$/.test(evidenceSha256)){
-    message('Wymagany SHA-256 archiwizowanego dokumentu.',true);return;
-  }
+   try {
+     const uploaded=await uploadEvidencePdf();
+     if(!uploaded)return;
+     evidenceSha256=uploaded.sha256;
+   } catch(err){message(err.message,true);return}
  }
  const wording=action==='receive'?'Potwierdzam fizyczne odebranie wymienionych urzadzen':
    action==='dispatch'?'Potwierdzam fizyczne wydanie wymienionych urzadzen':

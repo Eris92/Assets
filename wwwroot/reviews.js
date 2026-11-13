@@ -5,6 +5,8 @@ function renderAnnualReviews() {
  const container=$('annualReviewRows'); if(!container)return;
  if(!myReviewRows.length){container.innerHTML='<p class="empty">Brak przegladow do wyswietlenia.</p>';return}
  const year=new Date().getUTCFullYear();
+ const manual=$('manualReviewPanel');
+ if(manual){manual.hidden=!me?.admin;$('manualReviewYear').value=year}
  const list=myReviewRows.filter(x=>x.year===year);
  container.innerHTML=list.map(row=>{
    const done=row.status==='Confirmed';
@@ -65,3 +67,25 @@ async function loadTeamReviewStatus(){
 }
 $('teamReviewRefresh').onclick=loadTeamReviewStatus;
 $('annualReviewRefresh').onclick=loadAnnualReviews;
+
+async function submitManualAnnualReview(e){
+ e.preventDefault();if(!me?.admin)return;
+ const file=$('manualReviewPdf').files?.[0];
+ if(!file){message('Wybierz podpisany PDF.',true);return}
+ const login=$('manualReviewLogin').value.trim();
+ const year=Number($('manualReviewYear').value);
+ const kind=$('manualReviewKind').value;
+ if(!confirm('Potwierdzic przeglad na podstawie podpisanego dokumentu? Ten zapis zarchiwizuje PDF i SHA-256.'))return;
+ const button=$('manualReviewSubmit');button.disabled=true;
+ try{
+   const uploaded=await uploadEvidencePdf(file);
+   if(!uploaded)return;
+   const body={login,kind,year,sha256:uploaded.sha256,
+     evidenceReference:'AssetsEvidenceVault/'+uploaded.sha256};
+   await api('/api/admin/reviews/manual',{method:'POST',body:JSON.stringify(body)});
+   message('Zapisano papierowy przeglad i archiwum PDF SHA-256: '+uploaded.sha256);
+   $('manualReviewForm').reset();await loadAnnualReviews();
+ }catch(err){message(err.message,true)}
+ finally{button.disabled=false}
+}
+$('manualReviewForm').addEventListener('submit',submitManualAnnualReview);
