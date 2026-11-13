@@ -76,3 +76,6 @@ nav button.active .navIcon,nav button:hover .navIcon{opacity:1;color:#70dcca}
 #custodyInboxRows .decision{flex-wrap:wrap}
 .custodyAction{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
 #pendingManagerAssets .protocol-row{padding:11px 0;border-bottom:1px solid #e3e9ed}
+
+#handoverView .handover-field select{width:100%;padding:10px;border:1px solid #cadbe4;border-radius:7px}
+#handoverView .handover-note{margin:10px 0}

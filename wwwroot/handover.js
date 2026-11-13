@@ -1,7 +1,7 @@
 // Operator-only handover UI. API enforces Windows AD group permissions.
 const handover = {
-  mode:'return', source:null, target:null, assets:[], selected:new Map(), protocols:[],
-  results:{source:[],target:[]}, queries:{source:'',target:'',asset:'',notes:''},
+  mode:'return', source:null, target:null, intermediate:null, evidenceMode:'hybrid', assets:[], selected:new Map(), protocols:[],
+  results:{source:[],target:[],intermediate:[]}, queries:{source:'',target:'',intermediate:'',asset:'',notes:''},
   timers:{}, busy:false, request:0
 };
 function hEsc(value){ return escapeHtml(value??''); }
@@ -22,7 +22,7 @@ function hRenderHistory(){
     '<div class="protocol-row"><div><strong>ASSETS-'+p.id+' · '+(p.mode==='return'?'Zwrot':'Przekazanie')+'</strong>'+
     '<small>'+hEsc(p.sourceName||'Magazyn')+' → '+hEsc(p.targetName||'Magazyn')+
     ' · '+p.items.length+' szt. · '+hEsc(new Date(p.createdAt).toLocaleString('pl-PL'))+
-    '</small><small>Oczekuje na podpisy</small></div>'+
+    '</small><small>'+hEsc(p.status==='PendingIntermediateDelivery'?'U kierownika - czeka na przekazanie':p.status)+'</small></div>'+
     '<button type="button" class="secondary" data-h-print="'+p.id+'">Drukuj / PDF</button></div>').join(''):
     '<p class="meta">Nie utworzono jeszcze protokołów.</p>';
 }
@@ -61,7 +61,22 @@ function hRender(){
           <div class="handover-results" id="hTargetResults"></div>
           <div id="hTargetChosen">${hPerson('target')}</div>
         </div>`:''}
-        <div class="handover-note">Pracowników wyszukujemy w Active Directory. Protokół przygotowuje uprawniony operator działu.</div>
+        ${handover.mode==='transfer'? `
+        <div class="handover-field">
+          <label for="hIntermediateSearch">Pośrednik / kierownik (opcjonalnie)</label>
+          <input id="hIntermediateSearch" autocomplete="off" placeholder="Wyszukaj kierownika, który odbierze sprzęt" value="${hEsc(handover.queries.intermediate)}">
+          <div class="handover-results" id="hIntermediateResults"></div>
+          <div id="hIntermediateChosen">${hPerson('intermediate')}</div>
+        </div>`:''}
+        <div class="handover-note">Jeśli wybierzesz pośrednika, musi on odebrać sprzęt i osobno wydać go finalnemu użytkownikowi. Do momentu odbioru końcowego przekazanie pozostaje nierozliczone.</div>
+        <div class="handover-field">
+          <label for="hEvidenceMode">Metoda potwierdzenia</label>
+          <select id="hEvidenceMode">
+            <option value="hybrid" ${handover.evidenceMode==='hybrid'?'selected':''}>Elektroniczna lub papierowa</option>
+            <option value="electronic" ${handover.evidenceMode==='electronic'?'selected':''}>Elektroniczna (Windows SSO)</option>
+            <option value="paper" ${handover.evidenceMode==='paper'?'selected':''}>Papierowa / podpisany protokol</option>
+          </select>
+        </div>
       </div>
       <div class="settingsCard">
         <h2>2. Wybierz sprzęt</h2>
@@ -90,7 +105,7 @@ function hRender(){
   if(handover.source||handover.queries.asset.length>=2)hFetchAssets();
 }
 async function hFetchUsers(role,q){
-  const target=$('h'+(role==='source'?'Source':'Target')+'Results');
+  const target=$('h'+(role==='source'?'Source':role==='target'?'Target':'Intermediate')+'Results');
   if(!target)return;
   if(q.trim().length<2){target.innerHTML='';return}
   target.textContent='Szukam w Active Directory...';
@@ -135,6 +150,7 @@ async function hSave(){
   handover.busy=true; $('handoverSubmit').disabled=true;
   try{
     const payload={mode:handover.mode,sourceLogin:handover.source?.login||'',targetLogin:handover.target?.login||'',
+      intermediateLogin:handover.intermediate?.login||'',evidenceMode:handover.evidenceMode,
       assetIds:[...handover.selected.keys()],notes:$('handoverNotes').value};
     const result=await api('/api/handover/protocols',{method:'POST',body:JSON.stringify(payload)});
     handover.selected.clear();hRenderItems();await hFetchHistory();
@@ -169,7 +185,7 @@ document.addEventListener('click',event=>{
 });
 document.addEventListener('input',e=>{
   if(!me?.handover||$('handoverView').hidden||!$('handoverApp')?.contains(e.target))return;
-  const field=e.target.id,role=field==='hSourceSearch'?'source':field==='hTargetSearch'?'target':null;
+  const field=e.target.id,role=field==='hSourceSearch'?'source':field==='hTargetSearch'?'target':field==='hIntermediateSearch'?'intermediate':null;
   if(role){
     handover.queries[role]=e.target.value;clearTimeout(handover.timers[role]);
     const query=e.target.value;
@@ -182,6 +198,7 @@ document.addEventListener('input',e=>{
   }
 });
 document.addEventListener('change',e=>{
+  if(e.target?.id==='hEvidenceMode'){handover.evidenceMode=e.target.value;return}
   if(!me?.handover||$('handoverView').hidden||!$('handoverApp')?.contains(e.target))return;
   const id=e.target.dataset.hAsset;
   if(!id)return;
