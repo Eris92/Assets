@@ -33,7 +33,7 @@ public static class JiraAssetWorkflow {
             User = value?["user"]?["accountId"]?.ToString() ?? "",
             Reference = value?["referencedObject"]?["id"]?.ToString() ??
                         value?["referencedObject"]?["objectKey"]?.ToString() ?? ""
-        }).Select(JsonSerializer.Serialize).OrderBy(x => x, StringComparer.Ordinal).ToArray();
+        }).Select(x => JsonSerializer.Serialize(x)).OrderBy(x => x, StringComparer.Ordinal).ToArray();
         return JsonSerializer.Serialize(stable);
     }
 

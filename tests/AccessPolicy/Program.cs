@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 static void Check(bool value, string message) { if (!value) throw new Exception(message); }
 var user = new AccessRule("user", "User", "User", "User", "Allow");
 var admin = new AccessRule("admin", "Admin", "Group", "Admin", "Allow");
@@ -11,7 +12,6 @@ Check(!AccessPolicy.Evaluate(true, false, [user, admin, deny]).Allowed, "Deny mu
 Check(AccessPolicy.Evaluate(true, true, [deny]).Admin, "Bootstrap administrator must retain recovery access");
 Console.WriteLine("PASS: anonymous, default deny, user role, admin role, deny precedence, bootstrap recovery");
 
-using System.Text.Json.Nodes;
 var fullPage = JsonNode.Parse("""{"values":[{"id":"1"},{"id":"2"}],"totalFilterCount":1000,"hasMoreResults":true}""")!;
 Check(JiraAssetWorkflow.Entries(fullPage).Count == 2, "AQL values parsing");
 Check(JiraAssetWorkflow.HasMore(fullPage, 998, 2, 2), "Capped total must not truncate pagination");
