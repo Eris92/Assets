@@ -1,5 +1,20 @@
 # Assets Portal
 
+## Audit trail (180-day local retention)
+
+The SQLite PortalAudit table tracks every authenticated API request on the server,
+including HTTP status and failures, and separate best-effort browser click events.
+Records carry UTC time, Windows identity, action, target identifier/view, source,
+result, request correlation ID, and remote socket IP. The browser never sends
+passwords, Jira tokens, input contents, or page body as click telemetry. Client
+clicks can be suppressed/forged, therefore the server log remains authoritative.
+Administrators can filter recent events and export up to 10,000 CSV rows. Export
+protects leading spreadsheet formula characters. For immutable/long-term records
+ship these logs to a SIEM or off-host append-only destination. Local database
+administrators can alter SQLite records; do not use these as tamper-proof evidence.
+
+
+
 ## Jira Assets read/write and audit (MC-SIRK parity)
 
 This integration reuses the MC-SIRK change sequence, not its MeshCentral code: AQL

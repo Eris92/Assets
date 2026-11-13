@@ -1,3 +1,4 @@
+using System.Threading.RateLimiting;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
@@ -26,10 +27,23 @@ builder.Services.AddAuthentication(IISDefaults.AuthenticationScheme);
 builder.Services.AddAuthorization();
 builder.Services.AddAntiforgery(o => o.HeaderName = "X-CSRF-TOKEN");
 builder.Services.AddHttpClient("jira", c => c.Timeout = TimeSpan.FromSeconds(20));
+builder.Services.AddRateLimiter(options => {
+    options.AddPolicy("clicks", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.User.Identity?.Name ?? context.Connection.RemoteIpAddress?.ToString() ?? "Anonymous",
+            _ => new FixedWindowRateLimiterOptions {
+                PermitLimit = 240,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                AutoReplenishment = true
+            }));
+    options.RejectionStatusCode = 429;
+});
 var app = builder.Build();
 app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
@@ -68,6 +82,24 @@ using (var db = new SqliteConnection(ConnectionString())) {
     }
 }
 
+var audit = new OperationalAudit(ConnectionString(), app.Logger);
+audit.Initialize();
+// Server-side events are authoritative; browser clicks are separate, untrusted telemetry.
+app.Use(async (ctx, next) => {
+    if (!ctx.Request.Path.StartsWithSegments("/api")) { await next(ctx); return; }
+    var outcome = "Success";
+    try {
+        await next(ctx);
+        if (ctx.Response.StatusCode >= 400) outcome = "HTTP " + ctx.Response.StatusCode;
+    } catch {
+        outcome = "UnhandledException";
+        throw;
+    } finally {
+        audit.Write(ctx.User.Identity?.Name ?? "Anonymous", "Server",
+            ctx.Request.Method, ctx.Request.Path.Value ?? "", outcome,
+            ctx.Connection.RemoteIpAddress?.ToString(), ctx.TraceIdentifier, ctx.Response.StatusCode);
+    }
+});
 var access = new AccessControl(ConnectionString(), () => Setting("AdminGroup", "Portal:AdminGroup"), () => app.Configuration.GetSection("Portal:AdminUsers").Get<string[]>() ?? []);
 app.Use(async (ctx, next) => {
     if (!ctx.Request.Path.StartsWithSegments("/api")) { await next(ctx); return; }
@@ -408,6 +440,43 @@ app.MapGet("/api/admin/jira/workspaces", async (HttpContext ctx) => {
     }
 });
 
+// UI clicks are best-effort client telemetry: never record typed values or secrets.
+// Privileged actions remain auditable via server-side HTTP/decision events.
+app.MapPost("/api/audit/click", async (HttpContext ctx, IAntiforgery anti, ClickInput input) => {
+    await anti.ValidateRequestAsync(ctx);
+    if (string.IsNullOrWhiteSpace(input.Target) || input.Target.Length > 120 ||
+        !System.Text.RegularExpressions.Regex.IsMatch(input.Target, @"^[a-zA-Z0-9_.:\-=]+$") ||
+        (input.View?.Length ?? 0) > 50)
+        return Results.BadRequest();
+    var view = input.View ?? "";
+    if (view.Length > 0 && !System.Text.RegularExpressions.Regex.IsMatch(view, @"^[a-zA-Z0-9_-]+$"))
+        return Results.BadRequest();
+    audit.Write(ctx.User.Identity?.Name ?? "Anonymous", "Browser", "Click",
+        view.Length == 0 ? input.Target : view + ":" + input.Target,
+        "Observed", ctx.Connection.RemoteIpAddress?.ToString(), ctx.TraceIdentifier);
+    return Results.NoContent();
+}).RequireRateLimiting("clicks");
+
+app.MapGet("/api/admin/audit", (HttpContext ctx, string? actor, string? action, string? since, int? limit) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    if (actor?.Length > 128 || action?.Length > 80 || since?.Length > 40)
+        return Results.BadRequest();
+    if (!string.IsNullOrWhiteSpace(since) && !DateTimeOffset.TryParse(since, out _))
+        return Results.BadRequest(new { error = "Invalid since UTC timestamp" });
+    DateTimeOffset? start = string.IsNullOrWhiteSpace(since) ? null : DateTimeOffset.Parse(since);
+    return Results.Ok(audit.Query(actor, action, start, Math.Clamp(limit ?? 300, 1, 1000)));
+});
+
+app.MapGet("/api/admin/audit/export", (HttpContext ctx, string? actor, string? action, string? since) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    if (actor?.Length > 128 || action?.Length > 80 || since?.Length > 40 ||
+        (!string.IsNullOrWhiteSpace(since) && !DateTimeOffset.TryParse(since, out _)))
+        return Results.BadRequest();
+    DateTimeOffset? start = string.IsNullOrWhiteSpace(since) ? null : DateTimeOffset.Parse(since);
+    return Results.File(OperationalAudit.Csv(audit.Query(actor, action, start, 10000)),
+        "text/csv; charset=utf-8", $"Assets-audit-{DateTime.UtcNow:yyyyMMdd-HHmmss}.csv");
+});
+
 app.MapGet("/api/assets", async (HttpContext ctx) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     try {
@@ -645,6 +714,7 @@ app.MapPost("/api/reports/{id:long}/decision", async (HttpContext ctx, IAntiforg
 
 app.Run();
 
+record ClickInput(string Target, string? View);
 record ReportInput(string ObjectId, string? AttributeId, string? ProposedValue, string? Reason, string? Type = null);
 record TeamMember(string Login, string Name, string Manager, string? Role = null);
 record DecisionInput(string Action);
