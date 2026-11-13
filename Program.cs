@@ -101,6 +101,8 @@ using (var db = new SqliteConnection(ConnectionString())) {
 
 var delegations = new TeamDelegations(ConnectionString());
 delegations.Initialize();
+var custody = new HandoverLifecycle(ConnectionString());
+custody.Initialize();
 var audit = new OperationalAudit(ConnectionString(), app.Logger);
 audit.Initialize();
 var deployments = new DeploymentCoordinator(dataDirectory, app.Environment.ContentRootPath);
@@ -622,6 +624,9 @@ app.MapPost("/api/handover/protocols", async (HttpContext ctx, IAntiforgery anti
         input.AssetIds.Distinct(StringComparer.Ordinal).Count() != input.AssetIds.Length ||
         input.AssetIds.Any(s => !long.TryParse(s, out var n) || n <= 0) ||
         (input.Notes?.Length ?? 0) > 2000 ||
+        (input.IntermediateLogin?.Length ?? 0) > 128 ||
+        (input.EvidenceMode is not null and not ("paper" or "electronic" or "hybrid")) ||
+        (input.Mode == "return" && !string.IsNullOrWhiteSpace(input.IntermediateLogin)) ||
         (input.Mode == "return" && string.IsNullOrWhiteSpace(input.SourceLogin)) ||
         (input.Mode == "transfer" && string.IsNullOrWhiteSpace(input.TargetLogin)))
         return Results.BadRequest(new { error = "Invalid handover protocol input" });
@@ -630,6 +635,12 @@ app.MapPost("/api/handover/protocols", async (HttpContext ctx, IAntiforgery anti
             await Task.Run(() => HandoverDirectory.Resolve(input.SourceLogin), ctx.RequestAborted);
         var target = string.IsNullOrWhiteSpace(input.TargetLogin) ? null :
             await Task.Run(() => HandoverDirectory.Resolve(input.TargetLogin), ctx.RequestAborted);
+        var intermediary = string.IsNullOrWhiteSpace(input.IntermediateLogin) ? null :
+            await Task.Run(() => HandoverDirectory.Resolve(input.IntermediateLogin), ctx.RequestAborted);
+        if (intermediary is not null && ((source is not null &&
+            source.Login.Equals(intermediary.Login, StringComparison.OrdinalIgnoreCase)) ||
+            (target is not null && target.Login.Equals(intermediary.Login, StringComparison.OrdinalIgnoreCase))))
+            return Results.BadRequest(new { error = "Kierownik posredniczacy musi byc inna osoba." });
         if (source is not null && target is not null &&
             source.Login.Equals(target.Login, StringComparison.OrdinalIgnoreCase))
             return Results.BadRequest(new { error = "Zrodlowy i docelowy pracownik musza byc rozni." });
@@ -661,12 +672,24 @@ app.MapPost("/api/handover/protocols", async (HttpContext ctx, IAntiforgery anti
                 obj["objectType"]?["name"]?.ToString() ?? "",
                 JiraAssetWorkflow.AttributeFingerprint(ownerAttr)));
         }
+        var actor = ctx.User.Identity?.Name ?? "";
+        var domain = actor.Contains('\\') ? actor.Split('\\')[0] : "";
+        if (string.IsNullOrWhiteSpace(domain)) return Results.Problem(
+            "Windows domain-qualified identity is required for custody confirmations", statusCode: 503);
+        string Canonical(HandoverPerson? person) =>
+            person is null ? "WAREHOUSE" : domain + "\\" + person.Login;
+        var evidenceMode = input.EvidenceMode ?? Setting("EvidenceMode","Portal:EvidenceMode") ?? "hybrid";
+        if (evidenceMode is not ("paper" or "electronic" or "hybrid"))
+            return Results.BadRequest(new { error = "Invalid evidence mode" });
         using var db = new SqliteConnection(ConnectionString()); db.Open();
+        using var tx = db.BeginTransaction();
         using var cmd = db.CreateCommand();
+        cmd.Transaction = tx;
         cmd.CommandText = """
             INSERT INTO HandoverProtocols(Mode,SourceLogin,SourceName,TargetLogin,TargetName,
-              ItemsJson,Notes,CreatedAt,CreatedBy,Status)
-            VALUES($mode,$source,$sourceName,$target,$targetName,$items,$notes,$at,$actor,'AwaitingSignatures')
+              ItemsJson,Notes,CreatedAt,CreatedBy,Status,IntermediateLogin,IntermediateName,EvidenceMode)
+            VALUES($mode,$source,$sourceName,$target,$targetName,$items,$notes,$at,$actor,
+              'PendingDispatch',$intermediate,$intermediateName,$evidenceMode)
             """;
         cmd.Parameters.AddWithValue("$mode", input.Mode);
         cmd.Parameters.AddWithValue("$source", source?.Login ?? "");
@@ -676,15 +699,24 @@ app.MapPost("/api/handover/protocols", async (HttpContext ctx, IAntiforgery anti
         cmd.Parameters.AddWithValue("$items", JsonSerializer.Serialize(items));
         cmd.Parameters.AddWithValue("$notes", input.Notes?.Trim() ?? "");
         cmd.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("O"));
-        cmd.Parameters.AddWithValue("$actor", ctx.User.Identity?.Name ?? "");
+        cmd.Parameters.AddWithValue("$actor", actor);
+        cmd.Parameters.AddWithValue("$intermediate", intermediary?.Login ?? "");
+        cmd.Parameters.AddWithValue("$intermediateName", intermediary?.Name ?? "");
+        cmd.Parameters.AddWithValue("$evidenceMode", evidenceMode);
         cmd.ExecuteNonQuery();
         using var idCmd = db.CreateCommand();
+        idCmd.Transaction = tx;
         idCmd.CommandText = "SELECT last_insert_rowid()";
         var protocolId = (long)idCmd.ExecuteScalar()!;
+        custody.Create(db,tx,protocolId,Canonical(source),intermediary is null ? "" : Canonical(intermediary),
+            Canonical(input.Mode=="return" ? null : target),evidenceMode,actor,
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "",
+            ctx.Request.Headers.UserAgent.ToString());
+        tx.Commit();
         audit.Write(ctx.User.Identity?.Name ?? "", "Server", "Handover.Created",
-            "Protocol:" + protocolId, "AwaitingSignatures", ctx.Connection.RemoteIpAddress?.ToString(),
+            "Protocol:" + protocolId, "PendingDispatch", ctx.Connection.RemoteIpAddress?.ToString(),
             ctx.TraceIdentifier, 201);
-        return Results.Created("/api/handover/protocols/" + protocolId, new { id = protocolId, status = "AwaitingSignatures" });
+        return Results.Created("/api/handover/protocols/" + protocolId, new { id = protocolId, status = "PendingDispatch" });
     } catch (Exception ex) {
         app.Logger.LogError(ex, "Handover protocol could not be prepared");
         return Results.Problem("Nie udalo sie zapisac protokolu. Zmiany w Jira nie zostaly wykonane.",
@@ -709,9 +741,53 @@ app.MapGet("/api/handover/protocols", (HttpContext ctx) => {
             sourceLogin = reader.GetString(2), sourceName = reader.GetString(3),
             targetLogin = reader.GetString(4), targetName = reader.GetString(5),
             items, notes = reader.GetString(7), createdAt = reader.GetString(8),
-            createdBy = reader.GetString(9), status = reader.GetString(10) });
+            createdBy = reader.GetString(9), status = reader.GetString(10),
+            stages = custody.Stages(reader.GetInt64(0)) });
     }
     return Results.Ok(rows);
+});
+
+
+app.MapGet("/api/handover/inbox", (HttpContext ctx) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    return Results.Ok(custody.Inbox(ctx.User.Identity.Name!,CanHandover(ctx.User)));
+});
+app.MapGet("/api/handover/pending-custody", (HttpContext ctx) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    return Results.Ok(custody.PendingWithManager(ctx.User.Identity.Name!));
+});
+app.MapPost("/api/handover/protocols/{id:long}/stage/{stage:int}", async (
+    HttpContext ctx, IAntiforgery anti, long id, int stage, HandoverActionInput input) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    await anti.ValidateRequestAsync(ctx);
+    if (!input.Confirmed) return Results.BadRequest(new { error = "Explicit confirmation required" });
+    if (stage is < 1 or > 2) return Results.BadRequest();
+    try {
+        custody.Change(id,stage,input.Action,ctx.User.Identity.Name!,CanHandover(ctx.User),
+            ctx.Connection.RemoteIpAddress?.ToString()??"",
+            ctx.Request.Headers.UserAgent.ToString(),input.EvidenceSha256??"");
+        audit.Write(ctx.User.Identity.Name!,"Server","Custody."+input.Action,
+            "ASSETS-"+id+"/stage-"+stage,"Recorded",
+            ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,200);
+        return Results.Ok(new { id,stage,status="Recorded" });
+    } catch(KeyNotFoundException) { return Results.NotFound(); }
+    catch(InvalidOperationException ex) { return Results.Conflict(new {error=ex.Message}); }
+    catch(ArgumentException) { return Results.BadRequest(); }
+});
+app.MapGet("/api/handover/protocols/{id:long}/evidence", (HttpContext ctx,long id) => {
+    if (ctx.User.Identity?.IsAuthenticated!=true) return Results.Unauthorized();
+    var stages = custody.Stages(id);
+    if (stages.Length==0)return Results.NotFound();
+    var actor=ctx.User.Identity.Name!;
+    if (!CanHandover(ctx.User) && !stages.Any(s=>
+        string.Equals(s.SenderLogin,actor,StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(s.ReceiverLogin,actor,StringComparison.OrdinalIgnoreCase)))
+        return Results.Forbid();
+    return Results.Ok(new {
+        protocolId=id, hashAlgorithm="SHA-256",
+        warning="Local hash chain is audit evidence, not a qualified electronic signature or trusted timestamp.",
+        events=custody.Events(id),stages
+    });
 });
 
 app.MapGet("/api/handover/protocols/{id:long}/print", (HttpContext ctx, long id) => {
@@ -1101,5 +1177,7 @@ record DecisionInput(string Action);
 record SettingsInput(string SiteUrl, string AccountEmail, string CloudId, string? WorkspaceId, string? Aql,
     string OwnerAttributeId, string[] AllowedCorrectionAttributeIds, string AdminGroup, string? ApiToken,
     string? HandoverGroup = null);
-record HandoverProtocolInput(string Mode, string? SourceLogin, string? TargetLogin, string[] AssetIds, string? Notes);
+record HandoverProtocolInput(string Mode, string? SourceLogin, string? TargetLogin, string[] AssetIds,
+    string? Notes, string? IntermediateLogin = null, string? EvidenceMode = null);
+record HandoverActionInput(string Action, bool Confirmed, string? EvidenceSha256 = null);
 record HandoverItem(string Id, string Key, string Name, string Type, string OwnerSnapshot);
