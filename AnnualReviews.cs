@@ -65,7 +65,8 @@ internal sealed class AnnualReviewStore {
         return new DateOnly(year,month,Math.Min(day,DateTime.DaysInMonth(year,month)));
     }
     internal AnnualReviewRecord[] Ensure(string login,Func<string,string?> setting) {
-        var year=DateTime.UtcNow.Year;
+        var year=TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
+            TimeZoneInfo.FindSystemTimeZoneById("Central European Standard Time")).Year;
         using var db=Open();using var tx=db.BeginTransaction();
         foreach(var(kind,key,defaultValue) in new[]{
             ("assets","AssetsDueMonthDay","12-01"),
@@ -103,7 +104,8 @@ internal sealed class AnnualReviewStore {
     internal AnnualReviewRecord Confirm(string actor,string kind,string snapshot,string snapshotJson,bool discrepancy) {
         if(kind is not ("assets" or "permissions"))throw new ArgumentException("Invalid review kind");
         if(snapshot.Length!=64||!snapshot.All(Uri.IsHexDigit))throw new ArgumentException("Invalid snapshot hash");
-        var year=DateTime.UtcNow.Year;
+        var year=TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
+            TimeZoneInfo.FindSystemTimeZoneById("Central European Standard Time")).Year;
         using var db=Open();using var cmd=db.CreateCommand();
         cmd.CommandText="""
             UPDATE AnnualReviews SET Status=$status,Mode='electronic',CompletedAt=$at,

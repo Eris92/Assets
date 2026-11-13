@@ -5,6 +5,9 @@ internal sealed record HandoverPerson(string Login, string Name, string Email, s
 internal static class HandoverDirectory {
     private const AuthenticationTypes SecureBinding =
         AuthenticationTypes.Secure | AuthenticationTypes.Signing | AuthenticationTypes.Sealing;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string,
+        (DateTimeOffset Expires, TeamMember[] People)> TeamCache =
+        new(StringComparer.OrdinalIgnoreCase);
 
     // Escaping RFC4515 filter metacharacters prevents directory filter injection.
     private static string EscapeFilter(string text) => text
@@ -70,6 +73,9 @@ internal static class HandoverDirectory {
     public static TeamMember[] ManagedTeam(string managerLogin) {
         if (string.IsNullOrWhiteSpace(managerLogin) || managerLogin.Length > 256)
             return [];
+        var now=DateTimeOffset.UtcNow;
+        if(TeamCache.TryGetValue(managerLogin,out var cached) && cached.Expires>now)
+            return cached.People;
         var domain = managerLogin.Contains('\\') ? managerLogin.Split('\\')[0] : "";
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var queued = new Queue<(string Login, int Depth)>();
@@ -110,7 +116,13 @@ internal static class HandoverDirectory {
                 queued.Enqueue((sam, depth+1));
             }
         }
-        return items.ToArray();
+        var snapshot=items.ToArray();
+        TeamCache[managerLogin]=(DateTimeOffset.UtcNow.AddMinutes(2),snapshot);
+        if(TeamCache.Count>2000) {
+            foreach(var stale in TeamCache.Where(x=>x.Value.Expires<DateTimeOffset.UtcNow))
+                TeamCache.TryRemove(stale.Key,out _);
+        }
+        return snapshot;
     }
 
     // Direct membership only. It is displayed as AD groups, not as effective
