@@ -37,6 +37,13 @@ builder.Services.AddRateLimiter(options => {
                 QueueLimit = 0,
                 AutoReplenishment = true
             }));
+    options.AddPolicy("handoverSearch", context =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            context.User.Identity?.Name ?? context.Connection.RemoteIpAddress?.ToString() ?? "Anonymous",
+            _ => new FixedWindowRateLimiterOptions {
+                PermitLimit = 25, Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0, AutoReplenishment = true
+            }));
     options.RejectionStatusCode = 429;
 });
 var app = builder.Build();
@@ -527,6 +534,211 @@ app.MapGet("/api/admin/audit/export", (HttpContext ctx, string? actor, string? a
         "text/csv; charset=utf-8", $"Assets-audit-{DateTime.UtcNow:yyyyMMdd-HHmmss}.csv");
 });
 
+// Handover inventory is isolated from regular self-service assets.
+// Full Jira catalog access requires the explicit AD handover role or administrator.
+app.MapGet("/api/handover/users", async (HttpContext ctx, string? q) => {
+    if (!CanHandover(ctx.User)) return AuthError(ctx);
+    if (q is null || q.Trim().Length is < 2 or > 80) return Results.BadRequest(new { error = "Enter at least 2 characters" });
+    try {
+        var people = await Task.Run(() => HandoverDirectory.Search(q), ctx.RequestAborted);
+        return Results.Ok(people);
+    } catch (Exception ex) {
+        app.Logger.LogError(ex, "AD handover directory search failed");
+        return Results.Problem("Nie mozna przeszukac AD. Sprawdz polaczenie z DC i uprawnienia konta app pool.", statusCode: 502);
+    }
+}).RequireRateLimiting("handoverSearch");
+
+string SafeOwnerAql(HandoverPerson person) {
+    var mail = person.Email;
+    if (mail.Length > 254 || !System.Text.RegularExpressions.Regex.IsMatch(mail,
+            @"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"))
+        throw new InvalidOperationException("The AD email cannot be used in Jira AQL safely");
+    return $"Osoba_odpowiedzialna.\"Email Address\" = \"{mail}\"";
+}
+bool IsEquipment(JsonNode obj) {
+    var name = obj["objectType"]?["name"]?.ToString() ?? "";
+    return !System.Text.RegularExpressions.Regex.IsMatch(name,
+        @"user|person|employee|pracowni|uzytk|użytk|osob", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+}
+object HandoverAsset(JsonNode obj) => new {
+    id = obj["id"]?.ToString(),
+    key = obj["objectKey"]?.ToString(),
+    name = obj["name"]?.ToString() ?? obj["label"]?.ToString(),
+    type = obj["objectType"]?["name"]?.ToString(),
+    owner = AttributeValue(Attribute(obj, Setting("OwnerAttributeId", "Jira:OwnerAttributeId") ?? "")),
+    serial = (obj["attributes"] as JsonArray ?? new JsonArray())
+        .FirstOrDefault(a => (a?["objectTypeAttribute"]?["name"]?.ToString() ?? "")
+            .Contains("seryj", StringComparison.OrdinalIgnoreCase)) is JsonNode serialAttr
+        ? AttributeValue(serialAttr) : ""
+};
+
+app.MapGet("/api/handover/assets", async (HttpContext ctx, string? q, string? owner) => {
+    if (!CanHandover(ctx.User)) return AuthError(ctx);
+    var query = (q ?? "").Trim();
+    if (query.Length > 100 || query.Any(char.IsControl) || (string.IsNullOrWhiteSpace(owner) && query.Length < 2))
+        return Results.BadRequest(new { error = "Wpisz co najmniej 2 znaki lub wybierz pracownika." });
+    try {
+        HandoverPerson? person = null;
+        if (!string.IsNullOrWhiteSpace(owner))
+            person = await Task.Run(() => HandoverDirectory.Resolve(owner), ctx.RequestAborted);
+        var aql = person is null ? "objectId > 0" : SafeOwnerAql(person);
+        var objects = await QueryAssets(aql);
+        var available = objects.Where(IsEquipment)
+            .Where(o => query.Length == 0 ||
+                (o["objectKey"]?.ToString() ?? "").Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                (o["name"]?.ToString() ?? o["label"]?.ToString() ?? "").Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                (o["objectType"]?["name"]?.ToString() ?? "").Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                (o["attributes"]?.ToJsonString() ?? "").Contains(query, StringComparison.OrdinalIgnoreCase))
+            .Take(101).ToList();
+        return Results.Ok(new { items = available.Take(100).Select(HandoverAsset),
+            truncated = available.Count > 100, owner = person?.Login });
+    } catch (Exception ex) {
+        app.Logger.LogError(ex, "Handover inventory search failed");
+        return Results.Problem("Nie udalo sie pobrac ewidencji z Jira lub wyszukac pracownika w AD.",
+            statusCode: 502);
+    }
+}).RequireRateLimiting("handoverSearch");
+
+app.MapPost("/api/handover/protocols", async (HttpContext ctx, IAntiforgery anti,
+    HandoverProtocolInput input) => {
+    if (!CanHandover(ctx.User)) return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    if (input.Mode is not ("return" or "transfer") ||
+        input.AssetIds is null || input.AssetIds.Length is < 1 or > 20 ||
+        input.AssetIds.Distinct(StringComparer.Ordinal).Count() != input.AssetIds.Length ||
+        input.AssetIds.Any(s => !long.TryParse(s, out var n) || n <= 0) ||
+        (input.Notes?.Length ?? 0) > 2000 ||
+        (input.Mode == "return" && string.IsNullOrWhiteSpace(input.SourceLogin)) ||
+        (input.Mode == "transfer" && string.IsNullOrWhiteSpace(input.TargetLogin)))
+        return Results.BadRequest(new { error = "Invalid handover protocol input" });
+    try {
+        var source = string.IsNullOrWhiteSpace(input.SourceLogin) ? null :
+            await Task.Run(() => HandoverDirectory.Resolve(input.SourceLogin), ctx.RequestAborted);
+        var target = string.IsNullOrWhiteSpace(input.TargetLogin) ? null :
+            await Task.Run(() => HandoverDirectory.Resolve(input.TargetLogin), ctx.RequestAborted);
+        if (source is not null && target is not null &&
+            source.Login.Equals(target.Login, StringComparison.OrdinalIgnoreCase))
+            return Results.BadRequest(new { error = "Zrodlowy i docelowy pracownik musza byc rozni." });
+        var ownerId = Setting("OwnerAttributeId", "Jira:OwnerAttributeId");
+        if (!long.TryParse(ownerId, out _))
+            return Results.Problem("Configure Jira OwnerAttributeId", statusCode: 503);
+        HashSet<string>? owned = null;
+        if (source is not null) {
+            owned = (await QueryAssets(SafeOwnerAql(source)))
+                .Select(o => o["id"]?.ToString() ?? "").ToHashSet(StringComparer.Ordinal);
+        }
+        var items = new List<HandoverItem>();
+        foreach (var id in input.AssetIds) {
+            var obj = await Jira(HttpMethod.Get, "object/" + id);
+            if (!IsEquipment(obj)) return Results.BadRequest(new { error = "Object is not equipment" });
+            var ownerAttr = Attribute(obj, ownerId!);
+            if (ownerAttr is null)
+                return Results.Conflict(new { error = "Owner attribute not found on asset " + id });
+            var valueCount = JiraAssetWorkflow.ValueCount(ownerAttr);
+            if (valueCount > 1)
+                return Results.Conflict(new { error = "Asset has multiple owners: " + id });
+            if (source is not null && (owned is null || !owned.Contains(id)))
+                return Results.Conflict(new { error = "Asset is not assigned to the selected employee: " + id });
+            if (source is null && valueCount != 0)
+                return Results.Conflict(new { error = "Unassigned inventory search selected an assigned asset: " + id });
+            items.Add(new HandoverItem(id,
+                obj["objectKey"]?.ToString() ?? id,
+                obj["name"]?.ToString() ?? obj["label"]?.ToString() ?? id,
+                obj["objectType"]?["name"]?.ToString() ?? "",
+                JiraAssetWorkflow.AttributeFingerprint(ownerAttr)));
+        }
+        using var db = new SqliteConnection(ConnectionString()); db.Open();
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO HandoverProtocols(Mode,SourceLogin,SourceName,TargetLogin,TargetName,
+              ItemsJson,Notes,CreatedAt,CreatedBy,Status)
+            VALUES($mode,$source,$sourceName,$target,$targetName,$items,$notes,$at,$actor,'AwaitingSignatures')
+            """;
+        cmd.Parameters.AddWithValue("$mode", input.Mode);
+        cmd.Parameters.AddWithValue("$source", source?.Login ?? "");
+        cmd.Parameters.AddWithValue("$sourceName", source?.Name ?? "");
+        cmd.Parameters.AddWithValue("$target", target?.Login ?? "");
+        cmd.Parameters.AddWithValue("$targetName", target?.Name ?? "");
+        cmd.Parameters.AddWithValue("$items", JsonSerializer.Serialize(items));
+        cmd.Parameters.AddWithValue("$notes", input.Notes?.Trim() ?? "");
+        cmd.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("O"));
+        cmd.Parameters.AddWithValue("$actor", ctx.User.Identity?.Name ?? "");
+        cmd.ExecuteNonQuery();
+        using var idCmd = db.CreateCommand();
+        idCmd.CommandText = "SELECT last_insert_rowid()";
+        var protocolId = (long)idCmd.ExecuteScalar()!;
+        audit.Write(ctx.User.Identity?.Name ?? "", "Server", "Handover.Created",
+            "Protocol:" + protocolId, "AwaitingSignatures", ctx.Connection.RemoteIpAddress?.ToString(),
+            ctx.TraceIdentifier, 201);
+        return Results.Created("/api/handover/protocols/" + protocolId, new { id = protocolId, status = "AwaitingSignatures" });
+    } catch (Exception ex) {
+        app.Logger.LogError(ex, "Handover protocol could not be prepared");
+        return Results.Problem("Nie udalo sie zapisac protokolu. Zmiany w Jira nie zostaly wykonane.",
+            statusCode: 502);
+    }
+}).RequireRateLimiting("handoverSearch");
+
+app.MapGet("/api/handover/protocols", (HttpContext ctx) => {
+    if (!CanHandover(ctx.User)) return AuthError(ctx);
+    using var db = new SqliteConnection(ConnectionString()); db.Open();
+    using var cmd = db.CreateCommand();
+    cmd.CommandText = """
+        SELECT Id,Mode,SourceLogin,SourceName,TargetLogin,TargetName,ItemsJson,
+               Notes,CreatedAt,CreatedBy,Status
+        FROM HandoverProtocols ORDER BY Id DESC LIMIT 100
+        """;
+    using var reader = cmd.ExecuteReader();
+    var rows = new List<object>();
+    while (reader.Read()) {
+        var items = JsonSerializer.Deserialize<HandoverItem[]>(reader.GetString(6)) ?? [];
+        rows.Add(new { id = reader.GetInt64(0), mode = reader.GetString(1),
+            sourceLogin = reader.GetString(2), sourceName = reader.GetString(3),
+            targetLogin = reader.GetString(4), targetName = reader.GetString(5),
+            items, notes = reader.GetString(7), createdAt = reader.GetString(8),
+            createdBy = reader.GetString(9), status = reader.GetString(10) });
+    }
+    return Results.Ok(rows);
+});
+
+app.MapGet("/api/handover/protocols/{id:long}/print", (HttpContext ctx, long id) => {
+    if (!CanHandover(ctx.User)) return AuthError(ctx);
+    using var db = new SqliteConnection(ConnectionString()); db.Open();
+    using var cmd = db.CreateCommand();
+    cmd.CommandText = """
+        SELECT Mode,SourceName,SourceLogin,TargetName,TargetLogin,ItemsJson,Notes,
+               CreatedAt,CreatedBy,Status FROM HandoverProtocols WHERE Id=$id
+        """;
+    cmd.Parameters.AddWithValue("$id", id);
+    using var reader = cmd.ExecuteReader();
+    if (!reader.Read()) return Results.NotFound();
+    var items = JsonSerializer.Deserialize<HandoverItem[]>(reader.GetString(5)) ?? [];
+    static string E(string? text) => System.Net.WebUtility.HtmlEncode(text ?? "");
+    var mode = reader.GetString(0) == "return" ? "ZDANIE SPRZETU" : "PRZEKAZANIE SPRZETU";
+    var rows = string.Join("", items.Select(a =>
+        "<tr><td>" + E(a.Key) + "</td><td>" + E(a.Name) +
+        "</td><td>" + E(a.Type) + "</td></tr>"));
+    var html = "<!doctype html><html lang=\"pl\"><head><meta charset=\"utf-8\"/>" +
+        "<title>Protokol Assets " + id + "</title>" +
+        "<style>body{font:14px Arial;margin:40px;color:#183047}h1{font-size:23px}" +
+        "table{border-collapse:collapse;width:100%;margin:25px 0}td,th{border:1px solid #aaa;padding:9px}" +
+        ".sign{display:flex;gap:45px;margin-top:80px}.sign div{flex:1;border-top:1px solid #555;padding:12px 0}" +
+        ".muted{color:#777;font-size:12px}@media print{button{display:none}}</style></head><body>" +
+        "<button onclick=\"window.print()\">Drukuj / zapisz jako PDF</button>" +
+        "<h1>PROTOKOL " + mode + " / ASSETS-" + id + "</h1>" +
+        "<p>Data UTC: " + E(reader.GetString(7)) +
+        "<br>Osoba wydajaca: " + E(reader.GetString(1)) + " (" + E(reader.GetString(2)) + ")" +
+        "<br>Osoba odbierajaca: " + E(reader.GetString(3)) + " (" + E(reader.GetString(4)) + ")" +
+        "<br>Przygotowal: " + E(reader.GetString(8)) + "</p>" +
+        "<table><tr><th>ID</th><th>Sprzet</th><th>Typ</th></tr>" + rows + "</table>" +
+        "<p>Uwagi: " + E(reader.GetString(6)) + "</p>" +
+        "<div class=\"sign\"><div>Podpis wydajacego / zdającego</div>" +
+        "<div>Podpis odbierajacego / magazynu</div></div>" +
+        "<p class=\"muted\">Status: " + E(reader.GetString(9)) +
+        ". Wydruk nie wykonuje automatycznie zmian przypisania w Jira; wymaga podpisow.</p>" +
+        "</body></html>";
+    return Results.Content(html, "text/html; charset=utf-8");
+});
+
 app.MapGet("/api/assets", async (HttpContext ctx) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     try {
@@ -773,3 +985,4 @@ record SettingsInput(string SiteUrl, string AccountEmail, string CloudId, string
     string OwnerAttributeId, string[] AllowedCorrectionAttributeIds, string AdminGroup, string? ApiToken,
     string? HandoverGroup = null);
 record HandoverProtocolInput(string Mode, string? SourceLogin, string? TargetLogin, string[] AssetIds, string? Notes);
+record HandoverItem(string Id, string Key, string Name, string Type, string OwnerSnapshot);
