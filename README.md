@@ -1,5 +1,7 @@
 # Assets Portal
 
+Workflow and legal notes: [custody evidence, delegation, reviews and notifications](docs/Asset-Custody-Evidence.md).
+
 ## Handover and assigned-asset visibility
 
 Regular /api/assets reads are filtered only by the authenticated Windows
