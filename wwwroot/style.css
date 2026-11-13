@@ -56,3 +56,16 @@ nav button.active .navIcon,nav button:hover .navIcon{opacity:1;color:#70dcca}
 .handover-history small{color:#748e9c;display:block;margin-top:4px}
 .handover-note{color:#75552c;background:#fff5df;border-radius:8px;padding:12px;margin:13px 0;font-size:13px}
 @media(max-width:1080px){.handover-layout{grid-template-columns:1fr}}
+
+/* team list / all assets toggle and delegation panel */
+.teamOptions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.teamOptions label{display:flex;align-items:center;gap:7px;margin:0;font-size:13px}
+.teamOptions select{width:auto;min-width:140px}
+.teamAllMode{display:block}
+.teamAllMode>div:last-child{width:100%}
+.teamAllMode .equipmentTableWrap{max-width:100%;overflow-x:auto}
+#teamPermissionsRows .pill,#myPermissionsRows .pill{display:inline-block;border-radius:16px;background:#e5f2f1;color:#166d69;padding:6px 10px;font-size:12px;margin:3px}
+#delegatePanel summary{cursor:pointer}
+#delegateForm{display:flex;align-items:end;justify-content:flex-start}
+#delegateForm label{flex:1;margin:0}
+#delegateForm button{white-space:nowrap}

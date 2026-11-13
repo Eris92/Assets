@@ -571,7 +571,8 @@ string SafeOwnerAql(HandoverPerson person) {
 bool IsEquipment(JsonNode obj) {
     var name = obj["objectType"]?["name"]?.ToString() ?? "";
     return !System.Text.RegularExpressions.Regex.IsMatch(name,
-        @"user|person|employee|pracowni|uzytk|użytk|osob", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        @"^(user|users|person|persons|employee|employees|pracownik|pracownicy|uzytkownik|użytkownik|osoba|osoby)$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 }
 object HandoverAsset(JsonNode obj) => new {
     id = obj["id"]?.ToString(),
@@ -774,6 +775,7 @@ app.MapGet("/api/team", async (HttpContext ctx) => {
         var ownerId = Setting("OwnerAttributeId", "Jira:OwnerAttributeId");
         if (!long.TryParse(ownerId,out _)) return Results.Problem("Configure Jira OwnerAttributeId", statusCode:503);
         var delegatedRoots = delegations.ByDelegate(actor).Select(x=>x.ManagerLogin).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var directTeam = ReportsTo(actor).Select(p=>p.Login).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var equipment = new System.Collections.Concurrent.ConcurrentBag<object>();
         var failures = new System.Collections.Concurrent.ConcurrentBag<string>();
         using var gate = new SemaphoreSlim(3);
@@ -809,7 +811,7 @@ app.MapGet("/api/team", async (HttpContext ctx) => {
             people=people.Select(p=>new {
                 id=p.Login,name=p.Name,role=p.Role,
                 manager=LoginKey(p.Manager)==LoginKey(actor) || delegatedRoots.Contains(p.Manager) ? "me" : p.Manager,
-                delegated=delegatedRoots.Contains(p.Manager) || !ReportsTo(actor).Any(x=>LoginKey(x.Login)==LoginKey(p.Login))
+                delegated=!directTeam.Contains(p.Login)
             }),
             equipment=equipment.OrderBy(x=>System.Text.Json.JsonSerializer.Serialize(x)).ToArray()
         });

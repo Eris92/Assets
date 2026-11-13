@@ -20,6 +20,7 @@ function view(name) {
   if (!me?.allowed) return;
   if ((name === 'access' || name === 'admin' || name === 'settings' || name === 'deployment' || name === 'audit' || name === 'entra') && !me?.admin) return;
   if(name === 'handover' && !me?.handover) return;
+  if((name==='team'||name==='teamPermissions')&&!me?.manager)return;
   for (const item of ['assets','team','handover','permissions','teamPermissions','reports','admin','settings','deployment','audit','entra','access']) $(item+'View').hidden = item !== name;
   document.querySelectorAll('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === name));
   const equipmentView = name === 'assets' || name === 'team' || name === 'handover';
@@ -33,7 +34,7 @@ function view(name) {
   if (settingsView) { $('settingsSubnav').hidden = false; $('settingsNav').setAttribute('aria-expanded','true'); }
   $('title').textContent = ({assets:'M\u00f3j sprz\u0119t',team:'Sprz\u0119t mojego zespo\u0142u',handover:'Zdanie sprz\u0119tu',permissions:'Moje uprawnienia',teamPermissions:'Uprawnienia mojego zespo\u0142u',reports:'Moje zgłoszenia',admin:'Administracja',access:'Dostep do portalu',settings:'Ustawienia - Jira',deployment:'Aktualizacje',audit:'Logi audytu',entra:'Ustawienia - Entra ID'})[name];
   $('subtitle').textContent = ({assets:'Sprawdz przypisane elementy. Zglos sprzet, ktorego nie posiadasz.',team:'Zasoby bezposrednich i posrednich podwladnych.',handover:'Protok\u00f3\u0142 zdawczo-odbiorczy i zwrot sprz\u0119tu.',teamPermissions:'Dostepy bezposrednich i posrednich podwladnych.',permissions:'Przypisane dostepy do systemow i aplikacji.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.',access:'Zarzadzanie dostepem uzytkownikow i grup AD.',entra:'Polaczenie Microsoft Entra ID i dane organizacji.',settings:'Połączenie Jira, uprawnienia administratorów i zakres korekt.',deployment:'Aktualizacja z GitHub oraz przywrocenie poprzedniej wersji.',audit:'Kto, kiedy i jaka operacje wykonal w portalu.'})[name];
-  message(''); if (name === 'team') loadTeam(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'handover' && typeof loadHandover === 'function') loadHandover(); if (name === 'settings') loadSettings(); if (name === 'deployment') loadDeployment(); if (name === 'audit') loadAudit(); if (name === 'access') loadAccess();
+  message(''); if (name === 'team') loadTeam(); if(name==='permissions') loadMyPermissions(); if(name==='teamPermissions') loadTeamPermissions(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'handover' && typeof loadHandover === 'function') loadHandover(); if (name === 'settings') loadSettings(); if (name === 'deployment') loadDeployment(); if (name === 'audit') loadAudit(); if (name === 'access') loadAccess();
 }
 async function loadSettings() {
   try {
@@ -109,6 +110,32 @@ $('adminReports').addEventListener('click', async e => {
   b.disabled = true; try { await api(`/api/reports/${b.dataset.id}/decision`,{method:'POST',body:JSON.stringify({action})}); await loadReports(); await loadAssets(); await loadTeam(true); message('Decyzja została zapisana.'); } catch(err) { await loadReports(); message(err.message,true); b.disabled = false; }
 });
 $('refresh').onclick = loadAssets; $('refreshAdmin').onclick = loadReports;
+$('teamRefresh').onclick=()=>loadTeam(true);
+async function loadMyPermissions(){
+ try{const data=await api('/api/permissions');
+ $('myPermissionsRows').innerHTML=data.groups.length?data.groups.map(x=>'<span class="pill">'+escapeHtml(x)+'</span> ').join(''):
+ '<p class="empty">Brak bezposrednich grup AD.</p>'}
+ catch(e){$('myPermissionsRows').textContent=e.message}
+}
+async function loadTeamPermissions(){
+ if(!me?.manager)return;
+ if(typeof loadTeam==='function')await loadTeam();
+ const selector=$('teamPermissionsPerson');
+ const prior=selector.value;
+ selector.innerHTML=teamPeople.map(p=>'<option value="'+escapeHtml(p.id)+'">'+escapeHtml(p.name)+'</option>').join('');
+ if(prior&&teamPeople.some(p=>p.id===prior))selector.value=prior;
+ if(selector.value)await refreshTeamPermissions();
+}
+async function refreshTeamPermissions(){
+ const login=$('teamPermissionsPerson').value;if(!login)return;
+ try{const data=await api('/api/team/permissions?login='+encodeURIComponent(login));
+ $('teamPermissionsRows').innerHTML=data.groups.length?
+ '<p>'+data.groups.map(x=>'<span class="pill">'+escapeHtml(x)+'</span> ').join('')+'</p>':
+ '<p class="empty">Brak bezposrednich grup AD.</p>'}
+ catch(e){$('teamPermissionsRows').textContent=e.message}
+}
+$('teamPermissionsPerson').onchange=refreshTeamPermissions;
+$('teamPermissionsRefresh').onclick=refreshTeamPermissions;
 $('settingsForm').addEventListener('submit', async e => {
   e.preventDefault();
   const data = Object.fromEntries(['siteUrl','accountEmail','cloudId','workspaceId','aql','ownerAttributeId','adminGroup','handoverGroup'].map(id => [id,$(id).value.trim()]));
@@ -151,6 +178,7 @@ async function signIn() {
       return;
     }
     $('teamNav').hidden=!me.manager;
+    document.querySelector('button[data-view="teamPermissions"]').hidden=!me.manager;
     $('handoverNav').hidden=!me.handover;
     $('adminNav').hidden=$('settingsGroup').hidden=!me.admin;
     view('assets');
