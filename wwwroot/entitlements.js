@@ -138,6 +138,7 @@ function renderEntitlementTeam(){
   '>'+entHtml(p.name)+'</option>').join('')+'</select></label>':'')+
  '<label>Źródło<select id="entTeamCategory">'+entCategoryOptions(entState.teamCategory)+'</select></label>'+
  '<label class="searchFilter">Szukaj uprawnienia<input id="entTeamQuery" placeholder="Send As, Teams, Office..." value="'+entHtml(entState.teamQuery)+'"></label>'+
+ '<button type="button" class="secondary" id="entTeamOther">+ Zgłoś inny dostęp</button>'+
  '<button type="button" class="secondary" id="entTeamRefresh">Odśwież</button></div>'+
  entState.teamData.map(d=>entStatusInfo(d)).join('')+
  '<p class="equipmentCount">Wyniki: '+rows.length+' (dane '+entState.teamLoaded+' z '+
@@ -188,6 +189,44 @@ function entReportDialog(row){
  $('entReportKind').value='unneeded';
  $('entReportDialog').showModal();
 }
+function entOtherDialog(scope){
+ const people=scope==='team'&&me?.manager?entState.teamPeople:[{login:me.name,name:me.name}];
+ if(!people.length){message('Brak pracowników w zespole.',true);return}
+ $('permissionReportEmployee').innerHTML=people.map(p=>'<option value="'+entHtml(p.login)+'">'+
+    entHtml(p.name)+'</option>').join('');
+ const defaultLogin=scope==='team'?entState.teamCurrent:me.name;
+ if(people.some(p=>p.login===defaultLogin))$('permissionReportEmployee').value=defaultLogin;
+ $('permissionReportEmployee').disabled=scope!=='team';
+ $('permissionEmployeeLabel').hidden=scope!=='team';
+ $('permissionReportTitle').textContent='Zgłoś nieujęte uprawnienie';
+ $('permissionReportContext').textContent='Dostęp do aplikacji, folderu lub skrzynki niewidoczny w aktualnym katalogu.';
+ $('permissionReportKind').value='unlisted';
+ $('permissionExternalLabel').hidden=false;
+ $('permissionExternal').value='';
+ $('permissionExternal').required=true;
+ $('permissionReportReason').value='';
+ $('permissionReportDialog').showModal();
+}
+async function entOtherSubmit(e){
+ e.preventDefault();
+ const external=$('permissionExternal').value.trim();
+ const reason=$('permissionReportReason').value.trim();
+ if(external.length<3||reason.length<10){
+  message('Wpisz nazwę dostępu i uzasadnienie.',true);return;
+ }
+ try{
+  await api('/api/reports/permissions',{method:'POST',body:JSON.stringify({
+   employeeLogin:$('permissionReportEmployee').value,kind:'unlisted',
+   groupDn:'',externalAccess:external,reason
+  })});
+  $('permissionReportDialog').close();
+  view('reports');await loadReports();message('Zgłoszenie nieujętego dostępu zapisane.');
+ }catch(err){message(err.message,true)}
+}
+$('permissionReportForm').addEventListener('submit',entOtherSubmit);
+$('permissionReportClose').onclick=$('permissionReportCancel').onclick=()=>
+ $('permissionReportDialog').close();
+
 async function entSubmitReport(e){
  e.preventDefault();
  const row=entState.report;if(!row)return;
@@ -291,6 +330,8 @@ document.addEventListener('change',e=>{
 document.addEventListener('click',async e=>{
  const target=e.target.closest('button');if(!target)return;
  if(target.id==='entSelfRefresh')loadMyPermissions();
+ else if(target.id==='entSelfOther')entOtherDialog('self');
+ else if(target.id==='entTeamOther')entOtherDialog('team');
  else if(target.id==='entTeamRefresh')refreshTeamPermissions();
  else if(target.id==='entTeamNext'){
   const button=target;button.disabled=true;
