@@ -52,15 +52,43 @@ async function loadAssets() {
     renderPersonalEquipment();
   } catch(e) { $('assets').innerHTML = `<p class="empty">Nie udało się pobrać zasobów. ${escapeHtml(e.message)}</p>`; }
 }
-function statusName(s) { return ({Pending:'Oczekuje',Applying:'W trakcie',Approved:'Zatwierdzone',Rejected:'Odrzucone',AppliedAuditPending:'Zmieniono w Jira - komentarz do weryfikacji',NeedsReview:'Wymagana weryfikacja Jira',NeedsRegistration:'Do rejestracji w Jira'})[s] || s; }
+function statusName(s) { return ({Pending:'Oczekuje',Applying:'W trakcie',Approved:'Zatwierdzone',Rejected:'Odrzucone',AppliedAuditPending:'Zmieniono w Jira - komentarz do weryfikacji',NeedsReview:'Wymagana weryfikacja Jira',NeedsRegistration:'Do rejestracji w Jira',NeedsAccessReview:'Do przeglądu dostępu'})[s] || s; }
 function reportRow(r, admin) {
-  return `<article class="row"><div><h3>${escapeHtml(r.name)} <span class="key">${escapeHtml(r.key)}</span></h3><p><strong>${escapeHtml(({ 'not-held':'Nie posiadam tego sprzetu', 'employee-left':'Pracownik juz nie pracuje', assignment:'Nieprawidlowe przypisanie sprzetu', discovered:'Ujawniony dodatkowy sprzęt' })[r.type] || r.attribute)}:</strong> ${escapeHtml(r.oldValue)} → ${escapeHtml(r.proposedValue)}</p><p>${escapeHtml(r.reason)}</p>${r.type === "discovered" ? `<p class="meta">Typ: ${escapeHtml(r.equipmentType)} · S/N: ${escapeHtml(r.serialNumber || "nie podano")} · Etykieta: ${escapeHtml(r.assetTag || "nie podano")} · wymaga ręcznej weryfikacji</p>` : ""}<p class="meta">${escapeHtml(r.reporter)}${r.affectedEmployee ? ' · Pracownik: ' + escapeHtml(r.affectedEmployee) : ''} · ${escapeHtml(new Date(r.createdAt).toLocaleString('pl-PL'))} · ${escapeHtml(r.source)}</p>${r.jiraCommentId ? `<p class="meta">Jira comment ID: ${escapeHtml(r.jiraCommentId)}</p>` : ''}${r.jiraAuditError ? `<p class="meta">Uwaga: ${escapeHtml(r.jiraAuditError)}</p>` : ''}</div>${admin && r.status === 'Pending' ? `<div class="decision"><button data-decision="approve" data-id="${r.id}">${r.type === 'discovered' ? 'Przyjmij do rejestracji' : 'Zatwierdź'}</button><button class="reject" data-decision="reject" data-id="${r.id}">Odrzuć</button></div>` : `<span class="badge ${escapeHtml(r.status)}">${escapeHtml(statusName(r.status))}</span>`}</article>`;
+  const names={
+    'not-held':'Nie posiadam tego sprzętu',
+    'employee-left':'Pracownik już nie pracuje',
+    assignment:'Nieprawidłowe przypisanie sprzętu',
+    discovered:'Ujawniony dodatkowy sprzęt',
+    'permission-unneeded':'Dostęp niepotrzebny',
+    'permission-excessive':'Nadmierne uprawnienia',
+    'permission-unlisted':'Inne uprawnienie niewidoczne w AD'
+  };
+  const isPermission=(r.type||'').startsWith('permission-');
+  const outcome=isPermission ? 'Zgłoszenie dotyczy uprawnienia. Nie wykonuje automatycznie zmian w AD.' :
+    r.type==='discovered'?'Sprzęt do ręcznej rejestracji w Jira.':'';
+  const oldNew=isPermission ? '' : '<p>'+escapeHtml(r.oldValue)+' → '+escapeHtml(r.proposedValue)+'</p>';
+  return '<article class="row"><div><h3>'+escapeHtml(r.name)+
+    (r.key && r.key!=='AD'?'<span class="key">'+escapeHtml(r.key)+'</span>':'')+'</h3>'+
+    '<p><strong>'+escapeHtml(names[r.type]||r.attribute)+'</strong></p>'+oldNew+
+    '<p>'+escapeHtml(r.reason)+'</p>'+
+    (r.affectedEmployee?'<p class="meta">Pracownik: '+escapeHtml(r.affectedEmployee)+'</p>':'')+
+    (outcome?'<p class="meta">'+escapeHtml(outcome)+'</p>':'')+
+    '<p class="meta">'+escapeHtml(r.reporter)+' · '+
+    escapeHtml(new Date(r.createdAt).toLocaleString('pl-PL'))+' · '+escapeHtml(r.source)+'</p>'+
+    (r.jiraCommentId?'<p class="meta">Jira comment ID: '+escapeHtml(r.jiraCommentId)+'</p>':'')+
+    (r.jiraAuditError?'<p class="meta">'+escapeHtml(r.jiraAuditError)+'</p>':'')+
+    '</div>'+(admin&&r.status==='Pending'
+      ?'<div class="decision"><button data-decision="approve" data-id="'+r.id+'">'+
+       (isPermission?'Przekaż do kontroli dostępu':r.type==='discovered'?'Przyjmij do rejestracji':'Zatwierdź')+
+       '</button><button class="reject" data-decision="reject" data-id="'+r.id+'">Odrzuć</button></div>'
+      :'<span class="badge '+escapeHtml(r.status)+'">'+escapeHtml(statusName(r.status))+'</span>')+
+    '</article>';
 }
 async function loadReports() {
   try {
     const rows = await api('/api/reports');
     $('reports').innerHTML = rows.filter(r => r.reporter.toLowerCase() === me.name.toLowerCase()).map(r => reportRow(r,false)).join('') || '<p class="empty">Nie masz jeszcze zgłoszeń.</p>';
-    if (me.admin) { $('adminReports').innerHTML = rows.map(r => reportRow(r,true)).join('') || '<p class="empty">Brak zgłoszeń.</p>'; const count = rows.filter(r => r.status === 'Pending' || r.status === 'NeedsRegistration').length; $('pendingCount').textContent = String(count); }
+    if (me.admin) { $('adminReports').innerHTML = rows.map(r => reportRow(r,true)).join('') || '<p class="empty">Brak zgłoszeń.</p>'; const count = rows.filter(r => r.status === 'Pending' || r.status === 'NeedsRegistration' || r.status === 'NeedsAccessReview').length; $('pendingCount').textContent = String(count); }
   } catch(e) { message(e.message,true); }
 }
 $('permissionsNav').addEventListener('click', () => {
@@ -106,36 +134,11 @@ $('reportForm').addEventListener('submit', async e => {
 });
 $('adminReports').addEventListener('click', async e => {
   const b = e.target.closest('[data-decision]'); if (!b) return;
-  const action = b.dataset.decision; if (!confirm(action === 'approve' ? 'Przyjąć zgłoszenie? Jeśli dotyczy dodatkowego sprzętu, oznacza to wyłącznie ręczną weryfikację i rejestrację — bez automatycznych zmian w Jira.' : 'Odrzucić zgłoszenie?')) return;
+  const action = b.dataset.decision; if (!confirm(action === 'approve' ? 'Przyjąć zgłoszenie do oceny? Dla sprzętu spoza listy i uprawnień AD operacja tworzy zadanie ręcznej kontroli i nie zmienia danych źródłowych.' : 'Odrzucić zgłoszenie?')) return;
   b.disabled = true; try { await api(`/api/reports/${b.dataset.id}/decision`,{method:'POST',body:JSON.stringify({action})}); await loadReports(); await loadAssets(); await loadTeam(true); message('Decyzja została zapisana.'); } catch(err) { await loadReports(); message(err.message,true); b.disabled = false; }
 });
 $('refresh').onclick = loadAssets; $('refreshAdmin').onclick = loadReports;
 $('teamRefresh').onclick=()=>loadTeam(true);
-async function loadMyPermissions(){
- try{const data=await api('/api/permissions');
- $('myPermissionsRows').innerHTML=data.groups.length?data.groups.map(x=>'<span class="pill">'+escapeHtml(x)+'</span> ').join(''):
- '<p class="empty">Brak bezposrednich grup AD.</p>'}
- catch(e){$('myPermissionsRows').textContent=e.message}
-}
-async function loadTeamPermissions(){
- if(!me?.manager)return;
- if(typeof loadTeam==='function')await loadTeam();
- const selector=$('teamPermissionsPerson');
- const prior=selector.value;
- selector.innerHTML=teamPeople.map(p=>'<option value="'+escapeHtml(p.id)+'">'+escapeHtml(p.name)+'</option>').join('');
- if(prior&&teamPeople.some(p=>p.id===prior))selector.value=prior;
- if(selector.value)await refreshTeamPermissions();
-}
-async function refreshTeamPermissions(){
- const login=$('teamPermissionsPerson').value;if(!login)return;
- try{const data=await api('/api/team/permissions?login='+encodeURIComponent(login));
- $('teamPermissionsRows').innerHTML=data.groups.length?
- '<p>'+data.groups.map(x=>'<span class="pill">'+escapeHtml(x)+'</span> ').join('')+'</p>':
- '<p class="empty">Brak bezposrednich grup AD.</p>'}
- catch(e){$('teamPermissionsRows').textContent=e.message}
-}
-$('teamPermissionsPerson').onchange=refreshTeamPermissions;
-$('teamPermissionsRefresh').onclick=refreshTeamPermissions;
 $('settingsForm').addEventListener('submit', async e => {
   e.preventDefault();
   const data = Object.fromEntries(['siteUrl','accountEmail','cloudId','workspaceId','aql','ownerAttributeId','adminGroup','handoverGroup'].map(id => [id,$(id).value.trim()]));
