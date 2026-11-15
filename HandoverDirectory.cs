@@ -1,6 +1,7 @@
 using System.DirectoryServices;
 
 internal sealed record HandoverPerson(string Login, string Name, string Email, string Department);
+internal sealed record DirectoryGroup(string Id, string Name);
 
 internal static class HandoverDirectory {
     private const AuthenticationTypes SecureBinding =
@@ -125,29 +126,41 @@ internal static class HandoverDirectory {
         return snapshot;
     }
 
-    // Direct membership only. It is displayed as AD groups, not as effective
-    // transitive app permissions (which require separate source integrations).
-    public static string[] DirectGroups(string login) {
+    // Direct AD memberOf only. Excludes primary groups and nested/Entra/third-party access.
+    // The full distinguished name is retained to distinguish equal CNs across OUs.
+    public static DirectoryGroup[] DirectGroupEntries(string login) {
         var sam = login.Split('\\').Last();
         if (sam.Length is < 1 or > 128 || sam.Any(char.IsControl)) return [];
         using var rootDse = new DirectoryEntry("LDAP://RootDSE", null, null, SecureBinding);
         var dn = Convert.ToString(rootDse.Properties["defaultNamingContext"].Value);
-        if (string.IsNullOrWhiteSpace(dn)) return [];
+        if (string.IsNullOrWhiteSpace(dn))
+            throw new InvalidOperationException("Cannot locate AD default naming context");
         using var root = new DirectoryEntry("LDAP://" + dn, null, null, SecureBinding);
         using var searcher = new DirectorySearcher(root) {
-            Filter = "(&(objectCategory=person)(objectClass=user)(samaccountname=" + EscapeFilter(sam) + "))",
+            Filter = "(&(objectCategory=person)(objectClass=user)(samaccountname=" +
+                EscapeFilter(sam) + "))",
             SizeLimit = 2, ClientTimeout = TimeSpan.FromSeconds(8),
             ReferralChasing = ReferralChasingOption.None
         };
         searcher.PropertiesToLoad.Add("memberof");
         var entry = searcher.FindOne();
-        if (entry is null) return [];
+        if (entry is null)
+            throw new InvalidOperationException("AD account not found");
         if (!entry.Properties.Contains("memberof")) return [];
         return entry.Properties["memberof"].OfType<object>()
             .Select(x => Convert.ToString(x) ?? "")
-            .Where(x => x.StartsWith("CN=", StringComparison.OrdinalIgnoreCase))
-            .Select(x => x[3..].Split(',')[0].Replace("\\,", ",", StringComparison.Ordinal))
+            .Where(x => x.StartsWith("CN=", StringComparison.OrdinalIgnoreCase)
+                     && x.Length <= 2048)
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Take(300).ToArray();
+            .Select(x => new DirectoryGroup(x,
+                x[3..].Split(',')[0].Replace("\\,", ",", StringComparison.Ordinal)))
+            .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
+            .Take(300).ToArray();
     }
+
+    public static string[] DirectGroups(string login) =>
+        DirectGroupEntries(login).Select(x => x.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
 }
