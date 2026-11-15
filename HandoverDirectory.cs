@@ -159,6 +159,48 @@ internal static class HandoverDirectory {
             .Take(300).ToArray();
     }
 
+    // Server-side transitive membership resolved by AD LDAP_MATCHING_RULE_IN_CHAIN.
+    // PrimaryGroupID membership is not represented by member/memberOf and is
+    // explicitly outside this query.
+    public static DirectoryGroup[] TransitiveGroupEntries(string login) {
+        var sam=login.Split('\\').Last();
+        if(string.IsNullOrWhiteSpace(sam)||sam.Length>128||sam.Any(char.IsControl))return [];
+        using var rootDse=new DirectoryEntry("LDAP://RootDSE",null,null,SecureBinding);
+        var rootDn=Convert.ToString(rootDse.Properties["defaultNamingContext"].Value);
+        if(string.IsNullOrWhiteSpace(rootDn))
+            throw new InvalidOperationException("AD naming context unavailable");
+        using var root=new DirectoryEntry("LDAP://"+rootDn,null,null,SecureBinding);
+        using var userSearch=new DirectorySearcher(root){
+            Filter="(&(objectCategory=person)(objectClass=user)(samaccountname="+EscapeFilter(sam)+"))",
+            SearchScope=SearchScope.Subtree,SizeLimit=2,
+            ClientTimeout=TimeSpan.FromSeconds(8),ReferralChasing=ReferralChasingOption.None
+        };
+        userSearch.PropertiesToLoad.Add("distinguishedname");
+        var user=userSearch.FindOne();
+        if(user is null||!user.Properties.Contains("distinguishedname"))
+            throw new InvalidOperationException("AD account not found");
+        var dn=Convert.ToString(user.Properties["distinguishedname"][0]);
+        if(string.IsNullOrWhiteSpace(dn))throw new InvalidOperationException("AD user DN missing");
+        using var groups=new DirectorySearcher(root){
+            Filter="(&(objectCategory=group)(member:1.2.840.113556.1.4.1941:="+EscapeFilter(dn)+"))",
+            SearchScope=SearchScope.Subtree,PageSize=250,SizeLimit=1000,
+            ClientTimeout=TimeSpan.FromSeconds(10),ServerTimeLimit=TimeSpan.FromSeconds(9),
+            ReferralChasing=ReferralChasingOption.None
+        };
+        groups.PropertiesToLoad.Add("distinguishedname");
+        groups.PropertiesToLoad.Add("name");
+        using var results=groups.FindAll();
+        var entries=new List<DirectoryGroup>();
+        foreach(SearchResult row in results) {
+            var id=Property(row,"distinguishedname");
+            if(string.IsNullOrWhiteSpace(id))continue;
+            entries.Add(new DirectoryGroup(id,Property(row,"name")));
+        }
+        if(entries.Count>=1000)
+            throw new InvalidOperationException("AD nested-group safety limit reached");
+        return entries.DistinctBy(e=>e.Id,StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
     public static string[] DirectGroups(string login) =>
         DirectGroupEntries(login).Select(x => x.Name)
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();

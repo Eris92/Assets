@@ -1225,6 +1225,18 @@ async Task<EntitlementInventoryResponse> ReadEntitlementInventory(string login,b
             g.Id,g.Name,"DirectGroup","Active Directory direct memberOf",
             "Direct AD",login,now)));
         status[EntitlementCatalog.LocalAD]="Connected (direct groups only)";
+        try {
+            var nested=await Task.Run(()=>HandoverDirectory.TransitiveGroupEntries(login),ct);
+            var directIds=ad.Select(x=>x.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            entries.AddRange(nested.Where(x=>!directIds.Contains(x.Id)).Select(g=>
+                new EntitlementItem(EntitlementCatalog.LocalAD,g.Id,g.Name,
+                "NestedGroup","Active Directory nested group membership",
+                "Indirect AD (LDAP recursive)",login,now)));
+            status[EntitlementCatalog.LocalAD]="Connected (direct + transitive AD groups; excludes primary group)";
+        } catch(Exception ex) {
+            app.Logger.LogWarning(ex,"Nested AD membership lookup failed");
+            status[EntitlementCatalog.LocalAD]="Partial (direct AD only; recursive lookup failed)";
+        }
     } catch(Exception ex) {
         app.Logger.LogWarning(ex,"Entitlement AD query failed for scoped user");
         status[EntitlementCatalog.LocalAD]="AD unavailable; inspect server logs";
