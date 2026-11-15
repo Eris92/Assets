@@ -41,7 +41,7 @@ function renderTeam(){
   $('teamLayout').classList.toggle('teamAllMode',teamDisplay==='all');
   renderEquipmentList('team','teamAssets',rows,false);
   if(!people.length)$('teamAssets').innerHTML='<p class="empty">Nie odnaleziono zespolu w AD (manager) ani team.json. Sprawdz hierarchie i konto uslugi.</p>';
-  renderTeamDelegations();
+
 }
 async function loadTeam(force=false){
   try{
@@ -50,21 +50,38 @@ async function loadTeam(force=false){
       const data=await api('/api/team');
       teamPeople=data.people||[];teamEquipment=data.equipment||[];teamLoaded=true;
     }
-    const d=await api('/api/team/delegations');
-    teamDelegations=d.own||[];
     renderTeam();
   }catch(e){$('teamAssets').innerHTML='<p class="empty">'+escapeHtml(e.message)+'</p>'}
 }
+let teamCanManageDelegates=false;
+let delegationsGrantedToMe=[];
+async function loadDelegations(){
+ try {
+   const data=await api('/api/team/delegations');
+   teamDelegations=data.own||[];
+   delegationsGrantedToMe=data.grantedToMe||[];
+   teamCanManageDelegates=Boolean(data.canManage);
+   renderTeamDelegations();
+ } catch(error) {
+   $('delegateIncoming').textContent=error.message;
+   $('delegateIncoming').hidden=false;
+ }
+}
 function renderTeamDelegations(){
-  const area=$('teamDelegations');
-  if(!area)return;
-  const hasDirect=teamPeople.some(p=>p.manager==='me'&&!p.delegated);
-  $('delegatePanel').hidden=!hasDirect;
-  area.innerHTML=teamDelegations.length?
-    teamDelegations.map(d=>'<div class="protocol-row"><span>'+escapeHtml(d.delegateLogin)+
-      '<small>Od '+escapeHtml(new Date(d.createdAt).toLocaleDateString('pl-PL'))+
-      '</small></span><button class="secondary" data-delegate-remove="'+d.id+'">Cofnij</button></div>').join(''):
-    '<p class="meta">Brak aktywnych zastępców.</p>';
+ const area=$('teamDelegations');
+ if(!area)return;
+ $('delegatePanel').hidden=!teamCanManageDelegates;
+ area.innerHTML=teamDelegations.length?
+   teamDelegations.map(d=>'<div class="protocol-row"><span>'+escapeHtml(d.delegateLogin)+
+     '<small>Od '+escapeHtml(new Date(d.createdAt).toLocaleDateString('pl-PL'))+
+     '</small></span><button class="secondary" data-delegate-remove="'+d.id+'">Cofnij</button></div>').join(''):
+   '<p class="meta">Brak aktywnych zastępców.</p>';
+ const incoming=$('delegateIncoming');
+ incoming.hidden=!delegationsGrantedToMe.length;
+ incoming.innerHTML=delegationsGrantedToMe.length ?
+   '<h3>Dostęp otrzymany w zastępstwie</h3>'+
+   delegationsGrantedToMe.map(d=>'<p>'+escapeHtml(d.managerLogin)+
+   ' — podgląd sprzętu i uprawnień jego zespołu (bez prawa dalszej delegacji)</p>').join('') : '';
 }
 $('teamTree').onclick=e=>{const b=e.target.closest('[data-person]');if(b){selectedPerson=b.dataset.person;renderTeam()}};
 $('includeIndirect').onchange=renderTeam;
@@ -97,13 +114,13 @@ $('delegateForm').addEventListener('submit',async e=>{
  if(!confirm('Nadac zastepcy wglad do sprzetu i uprawnien Twojego zespolu?'))return;
  try{
    await api('/api/team/delegations',{method:'POST',body:JSON.stringify({login:value})});
-   $('delegateLogin').value='';await loadTeam(true);message('Zastępstwo zapisane.');
+   $('delegateLogin').value='';await loadDelegations();message('Zastępstwo zapisane.');
  }catch(ex){message(ex.message,true)}
 });
 $('teamDelegations').addEventListener('click',async e=>{
  const btn=e.target.closest('[data-delegate-remove]');if(!btn)return;
  if(!confirm('Cofnąć uprawnienia zastępcy?'))return;
- try{await api('/api/team/delegations/'+btn.dataset.delegateRemove,{method:'DELETE'});await loadTeam(true);}
+ try{await api('/api/team/delegations/'+btn.dataset.delegateRemove,{method:'DELETE'});await loadDelegations();}
  catch(ex){message(ex.message,true)}
 });
 $('reportType').onchange=()=>{const edit=$('reportType').value==='attribute';

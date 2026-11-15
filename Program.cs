@@ -1140,7 +1140,8 @@ app.MapGet("/api/team/delegations", (HttpContext ctx) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     return Results.Ok(new {
         own = delegations.ByManager(ctx.User.Identity.Name!),
-        grantedToMe = delegations.ByDelegate(ctx.User.Identity.Name!)
+        grantedToMe = delegations.ByDelegate(ctx.User.Identity.Name!),
+        canManage = ReportsTo(ctx.User.Identity.Name!).Length > 0
     });
 });
 app.MapGet("/api/team/delegates/search", async (HttpContext ctx,string? q) => {
