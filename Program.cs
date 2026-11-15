@@ -118,6 +118,8 @@ using (var db = new SqliteConnection(ConnectionString())) {
     }
 }
 
+var entitlements = new EntitlementCatalog(ConnectionString());
+entitlements.Initialize();
 var delegations = new TeamDelegations(ConnectionString());
 delegations.Initialize();
 var custody = new HandoverLifecycle(ConnectionString());
@@ -1203,6 +1205,176 @@ app.MapDelete("/api/team/delegations/{id:long}", async (HttpContext ctx, IAntifo
     return Results.NoContent();
 });
 
+// Returns only the current Windows user's entitlements or their effective
+// AD team scope. Hidden entries are filtered ON THE SERVER, not via CSS.
+async Task<object> ReadEntitlementInventory(string login,bool isAdmin,CancellationToken ct) {
+    var entries=new List<EntitlementItem>();
+    var status=new Dictionary<string,string>(StringComparer.Ordinal) {
+        [EntitlementCatalog.LocalAD]="Not loaded",
+        [EntitlementCatalog.Entra]="Not configured",
+        [EntitlementCatalog.Exchange]="Exchange delegate export not connected",
+        [EntitlementCatalog.Files]="Share/NTFS collector not connected",
+        [EntitlementCatalog.SharePoint]="SharePoint direct permissions collector not connected",
+        [EntitlementCatalog.Teams]="Not configured",
+        [EntitlementCatalog.M365License]="Not configured"
+    };
+    var now=DateTimeOffset.UtcNow.ToString("O");
+    try {
+        var ad=await Task.Run(()=>HandoverDirectory.DirectGroupEntries(login),ct);
+        entries.AddRange(ad.Select(g=>new EntitlementItem(EntitlementCatalog.LocalAD,
+            g.Id,g.Name,"DirectGroup","Active Directory direct memberOf",
+            "Direct AD",login,now)));
+        status[EntitlementCatalog.LocalAD]="Connected (direct groups only)";
+    } catch(Exception ex) {
+        app.Logger.LogWarning(ex,"Entitlement AD query failed for scoped user");
+        status[EntitlementCatalog.LocalAD]="AD unavailable; inspect server logs";
+    }
+    var snapshot=entitlements.Imports(login);
+    entries.AddRange(snapshot);
+    foreach(var source in snapshot.Select(x=>x.Source).Distinct(StringComparer.Ordinal)) {
+        var last=snapshot.Where(x=>x.Source==source).Max(x=>x.CapturedAt);
+        status[source]="Imported snapshot at "+last+" (not a live query)";
+    }
+    var tenant=Setting("GraphTenantId","Graph:TenantId");
+    var client=Setting("GraphClientId","Graph:ClientId");
+    var thumb=Setting("GraphCertificateThumbprint","Graph:CertificateThumbprint");
+    if(!string.IsNullOrWhiteSpace(tenant)||!string.IsNullOrWhiteSpace(client)||
+       !string.IsNullOrWhiteSpace(thumb)) {
+        if(string.IsNullOrWhiteSpace(tenant)||string.IsNullOrWhiteSpace(client)||
+           string.IsNullOrWhiteSpace(thumb)) {
+            status[EntitlementCatalog.Entra]="Incomplete Graph connector configuration";
+        } else {
+            try {
+                var person=await Task.Run(()=>HandoverDirectory.Resolve(login),ct);
+                var graph=await EntitlementGraphReader.ReadAsync(login,person.Email,
+                    tenant,client,thumb,ct);
+                foreach(var e in graph.Items) {
+                    // Live graph data takes precedence over previously imported
+                    // cloud snapshots when the same source/key exists.
+                    entries.RemoveAll(x=>x.Source==e.Source && x.Key==e.Key);
+                    entries.Add(e);
+                }
+                foreach(var kv in graph.Status)status[kv.Key]=kv.Value;
+            }catch(Exception ex) {
+                app.Logger.LogError(ex,"Graph entitlement lookup could not start");
+                status[EntitlementCatalog.Entra]="Graph connector unavailable; inspect server logs";
+            }
+        }
+    }
+    var metadata=entitlements.MetadataAll();
+    var list=new List<object>();
+    foreach(var entry in entries.DistinctBy(e=>e.Source+"\n"+e.Key,
+             StringComparer.OrdinalIgnoreCase)) {
+        var key=entry.Source+"\n"+entry.Key;
+        metadata.TryGetValue(key,out var m);
+        if(m?.Hidden==true&&!isAdmin)continue;
+        list.Add(new {entry.Source,entry.Key,entry.Name,entry.Kind,
+            entry.Details,entry.Via,entry.UserLogin,entry.CapturedAt,
+            note=m?.Note??"",hidden=m?.Hidden??false,
+            stale=DateTimeOffset.TryParse(entry.CapturedAt,out var stamp) &&
+               DateTimeOffset.UtcNow-stamp>TimeSpan.FromDays(7),
+            visibility=isAdmin?(m?.Hidden==true?"Admin only":"User visible"):"User visible"});
+    }
+    return new { login, items=list, sources=status,
+        warning="Not an exhaustive effective-access report: SharePoint item rights, nested on-prem ACLs and Exchange delegate rights require their source collectors." };
+}
+app.MapGet("/api/entitlements", async (HttpContext ctx,string? login) => {
+    if(ctx.User.Identity?.IsAuthenticated!=true)return Results.Unauthorized();
+    if(!access.Check(ctx.User).Allowed)return Results.Forbid();
+    var actor=ctx.User.Identity.Name!;
+    var requested=string.IsNullOrWhiteSpace(login)?actor:login.Trim();
+    if(requested.Length>256||requested.Any(char.IsControl))return Results.BadRequest();
+    if(!string.Equals(requested,actor,StringComparison.OrdinalIgnoreCase) &&
+       !EffectiveTeam(actor).Any(p=>p.Login.Equals(requested,StringComparison.OrdinalIgnoreCase)))
+        return Results.Forbid();
+    try {
+        return Results.Ok(await ReadEntitlementInventory(requested,IsAdmin(ctx.User),ctx.RequestAborted));
+    }catch(OperationCanceledException)when(ctx.RequestAborted.IsCancellationRequested){return Results.StatusCode(499);}
+    catch(Exception ex) {
+        app.Logger.LogError(ex,"Entitlement inventory failed");
+        return Results.Problem("Nie mozna pobrac ewidencji uprawnien.",statusCode:502);
+    }
+}).RequireRateLimiting("handoverSearch");
+
+app.MapGet("/api/admin/entitlements/metadata",(HttpContext ctx) => {
+    if(!IsAdmin(ctx.User))return AuthError(ctx);
+    return Results.Ok(entitlements.MetadataAll().Values.OrderBy(x=>x.Source)
+        .ThenBy(x=>x.Key).ToArray());
+});
+app.MapPut("/api/admin/entitlements/metadata",async(HttpContext ctx,IAntiforgery anti,
+    EntitlementMetadataInput input) => {
+    if(!IsAdmin(ctx.User))return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    try {
+        entitlements.Update(input,ctx.User.Identity!.Name!);
+        audit.Write(ctx.User.Identity.Name!,"Server","Entitlement.Metadata",
+            input.Source+"/"+input.Key,input.Hidden?"Hidden":"Visible",
+            ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,200);
+        return Results.Ok(entitlements.Metadata(input.Source,input.Key));
+    }catch(ArgumentException ex){return Results.BadRequest(new{error=ex.Message});}
+}).RequireRateLimiting("handoverSearch");
+
+// Trusted collectors can publish an entire user/source snapshot through an
+// administrator-authenticated import. This does not grant app privileges,
+// remove memberships, or infer effective file permissions.
+app.MapPost("/api/admin/entitlements/import",async(HttpContext ctx,IAntiforgery anti,
+    EntitlementImportInput input) => {
+    if(!IsAdmin(ctx.User))return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    try {
+        entitlements.Import(input,ctx.User.Identity!.Name!);
+        audit.Write(ctx.User.Identity.Name!,"Server","Entitlement.Import",
+            input.Source+"/"+input.UserLogin,"Rows:"+input.Items.Length,
+            ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,200);
+        return Results.Ok(new {imported=input.Items.Length,source=input.Source,user=input.UserLogin,
+            status="Snapshot stored; connector-specific source verification required"});
+    }catch(ArgumentException ex){return Results.BadRequest(new{error=ex.Message});}
+}).RequireRateLimiting("handoverSearch");
+
+app.MapGet("/api/admin/entitlements/graph",(HttpContext ctx) => {
+    if(!IsAdmin(ctx.User))return AuthError(ctx);
+    var tenant=Setting("GraphTenantId","Graph:TenantId")??"";
+    var client=Setting("GraphClientId","Graph:ClientId")??"";
+    var thumb=Setting("GraphCertificateThumbprint","Graph:CertificateThumbprint")??"";
+    return Results.Ok(new{tenantId=tenant,clientId=client,
+        certificateThumbprint=thumb,configured=Guid.TryParse(tenant,out _)&&
+        Guid.TryParse(client,out _)&&thumb.Length==40});
+});
+app.MapPost("/api/admin/entitlements/graph",async(HttpContext ctx,IAntiforgery anti,
+    GraphConfigurationInput input) => {
+    if(!IsAdmin(ctx.User))return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    var disable=string.IsNullOrWhiteSpace(input.TenantId)&&
+        string.IsNullOrWhiteSpace(input.ClientId)&&
+        string.IsNullOrWhiteSpace(input.CertificateThumbprint);
+    if(!disable&&(!Guid.TryParse(input.TenantId,out _)||
+       !Guid.TryParse(input.ClientId,out _)||
+       !System.Text.RegularExpressions.Regex.IsMatch(input.CertificateThumbprint??"",
+            @"^[a-fA-F0-9]{40}$")))
+        return Results.BadRequest(new{error="Tenant ID, Client ID and SHA1 certificate thumbprint must be valid"});
+    using var db=new SqliteConnection(ConnectionString());db.Open();
+    using var tx=db.BeginTransaction();
+    foreach(var kv in new[]{
+        ("GraphTenantId",input.TenantId??""),
+        ("GraphClientId",input.ClientId??""),
+        ("GraphCertificateThumbprint",input.CertificateThumbprint??"")
+    }) {
+        using var cmd=db.CreateCommand();cmd.Transaction=tx;
+        cmd.CommandText="""
+            INSERT INTO Settings(Key,Value) VALUES($key,$value)
+            ON CONFLICT(Key) DO UPDATE SET Value=excluded.Value
+            """;
+        cmd.Parameters.AddWithValue("$key",kv.Item1);
+        cmd.Parameters.AddWithValue("$value",kv.Item2.Trim());
+        cmd.ExecuteNonQuery();
+    }
+    tx.Commit();
+    audit.Write(ctx.User.Identity!.Name!,"Server","Graph.Configuration","Graph",
+        disable?"Disabled":"Configured",ctx.Connection.RemoteIpAddress?.ToString(),
+        ctx.TraceIdentifier,200);
+    return Results.Ok(new{configured=!disable});
+}).RequireRateLimiting("handoverSearch");
+
 app.MapGet("/api/permissions", async (HttpContext ctx) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     try {
@@ -1675,6 +1847,7 @@ record DiscoveredEquipmentInput(string EmployeeLogin, string EquipmentType, stri
     string? Serial, string? AssetTag, string? Description);
 record PermissionReportInput(string EmployeeLogin, string Kind, string? GroupDn,
     string? ExternalAccess, string Reason);
+record GraphConfigurationInput(string TenantId,string ClientId,string CertificateThumbprint);
 record TeamMember(string Login, string Name, string Manager, string? Role = null);
 record DecisionInput(string Action);
 record SettingsInput(string SiteUrl, string AccountEmail, string CloudId, string? WorkspaceId, string? Aql,
