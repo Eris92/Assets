@@ -107,3 +107,19 @@ nav button.active .navIcon,nav button:hover .navIcon{opacity:1;color:#70dcca}
 #permissionReportDialog label{display:grid;gap:6px}
 #permissionReportDialog select,#permissionReportDialog input,#permissionReportDialog textarea{width:100%}
 #teamPermissionsPager{justify-content:flex-end;align-items:center}
+
+/* Unified rights catalogue and administrator metadata */
+.entControls{display:flex;gap:9px;align-items:flex-end;flex-wrap:wrap;margin:16px 0}
+.entControls label{display:grid;gap:5px;min-width:155px}
+.entControls label.searchFilter{flex:1 1 260px}
+.entControls input,.entControls select{width:100%}
+.entStatus{border:1px solid #dce7ed;border-radius:9px;margin:13px 0;padding:9px 13px;background:#f9fbfc}
+.entStatus summary{cursor:pointer;font-weight:700}
+.entStatus div{padding:4px 0;font-size:12px}
+.entActions{display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.entHidden{opacity:.7;background:repeating-linear-gradient(45deg,#f5f5f5,#f5f5f5 10px,#fff 10px,#fff 20px)}
+#entEditDialog,#entReportDialog,#entManualDialog{width:min(680px,calc(100vw - 24px));max-height:90vh;overflow:auto}
+#entEditDialog form,#entReportDialog form,#entManualDialog form{display:grid;gap:12px}
+#entEditDialog label,#entReportDialog label,#entManualDialog label{display:grid;gap:6px}
+#entEditDialog .entCheck,#entManualDialog .entCheck{display:flex;align-items:center;gap:8px}
+#entEditDialog textarea,#entReportDialog textarea,#entManualDialog textarea{width:100%}

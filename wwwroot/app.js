@@ -18,10 +18,10 @@ async function api(path, options = {}) {
 function message(text, error = false) { $('message').textContent = text; $('message').className = error ? 'error' : ''; }
 function view(name) {
   if (!me?.allowed) return;
-  if ((name === 'access' || name === 'admin' || name === 'settings' || name === 'deployment' || name === 'audit' || name === 'notificationSettings' || name === 'entra') && !me?.admin) return;
+  if ((name === 'access' || name === 'admin' || name === 'settings' || name === 'deployment' || name === 'audit' || name === 'notificationSettings' || name === 'entitlementAdmin' || name === 'entra') && !me?.admin) return;
   if(name === 'handover' && !me?.handover) return;
   if((name==='team'||name==='teamPermissions'||name==='teamReviews'||name==='delegations')&&!me?.manager)return;
-  for (const item of ['assets','team','delegations','handover','permissions','teamPermissions','teamReviews','reviews','custodyInbox','reports','admin','settings','notificationSettings','deployment','audit','entra','access']) $(item+'View').hidden = item !== name;
+  for (const item of ['assets','team','delegations','handover','permissions','teamPermissions','teamReviews','reviews','custodyInbox','reports','admin','settings','notificationSettings','entitlementAdmin','deployment','audit','entra','access']) $(item+'View').hidden = item !== name;
   document.querySelectorAll('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === name));
   const equipmentView = name === 'assets' || name === 'team';
   $('equipmentNav').classList.toggle('active', equipmentView);
@@ -29,12 +29,12 @@ function view(name) {
   const permissionsView = name === 'permissions' || name === 'teamPermissions' || name === 'teamReviews';
   $('permissionsNav').classList.toggle('active', permissionsView);
   if (permissionsView) { $('permissionsSubnav').hidden = false; $('permissionsNav').setAttribute('aria-expanded','true'); }
-  const settingsView = name === 'settings' || name === 'notificationSettings' || name === 'deployment' || name === 'audit' || name === 'entra' || name === 'access';
+  const settingsView = name === 'settings' || name === 'notificationSettings' || name === 'entitlementAdmin' || name === 'deployment' || name === 'audit' || name === 'entra' || name === 'access';
   $('settingsNav').classList.toggle('active', settingsView);
   if (settingsView) { $('settingsSubnav').hidden = false; $('settingsNav').setAttribute('aria-expanded','true'); }
-  $('title').textContent = ({assets:'M\u00f3j sprz\u0119t',team:'Sprz\u0119t mojego zespo\u0142u',delegations:'Zastępstwa kierowników',handover:'Zdanie sprz\u0119tu',permissions:'Moje uprawnienia',teamPermissions:'Uprawnienia mojego zespo\u0142u',teamReviews:'Przeglady zespolu',reviews:'Przeglady roczne',custodyInbox:'Odbiory i akceptacje',reports:'Moje zgłoszenia',admin:'Administracja',access:'Dostep do portalu',settings:'Ustawienia - Jira',notificationSettings:'SMTP i Teams',deployment:'Aktualizacje',audit:'Logi audytu',entra:'Ustawienia - Entra ID'})[name];
-  $('subtitle').textContent = ({assets:'Sprawdz przypisane elementy. Zglos sprzet, ktorego nie posiadasz.',team:'Zasoby bezposrednich i posrednich podwladnych.',delegations:'Nadawanie i cofanie zastępstw wglądu do zespołu.',handover:'Protok\u00f3\u0142 zdawczo-odbiorczy i zwrot sprz\u0119tu.',teamPermissions:'Dostepy bezposrednich i posrednich podwladnych.',permissions:'Przypisane dostepy do systemow i aplikacji.',reviews:'Coroczna inwentaryzacja sprzetu i przeglad uprawnien.',teamReviews:'Sprawdz terminowe potwierdzenia zespolu.',custodyInbox:'Potwierdzanie wydania i odbioru sprzetu.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.',access:'Zarzadzanie dostepem uzytkownikow i grup AD.',entra:'Polaczenie Microsoft Entra ID i dane organizacji.',settings:'Połączenie Jira, uprawnienia administratorów i zakres korekt.',notificationSettings:'Konfiguracja SMTP, Teams Workflows i terminow przegladow.',deployment:'Aktualizacja z GitHub oraz przywrocenie poprzedniej wersji.',audit:'Kto, kiedy i jaka operacje wykonal w portalu.'})[name];
-  message(''); if (name === 'team') loadTeam(); if(name==='delegations')loadDelegations(); if(name==='teamReviews')loadTeamReviewStatus(); if(name==='reviews')loadAnnualReviews(); if(name==='custodyInbox')loadCustodyInbox(); if(name==='notificationSettings')loadNotificationSettings(); if(name==='permissions') loadMyPermissions(); if(name==='teamPermissions') loadTeamPermissions(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'handover' && typeof loadHandover === 'function') loadHandover(); if (name === 'settings') loadSettings(); if (name === 'deployment') loadDeployment(); if (name === 'audit') loadAudit(); if (name === 'access') loadAccess();
+  $('title').textContent = ({assets:'M\u00f3j sprz\u0119t',team:'Sprz\u0119t mojego zespo\u0142u',delegations:'Zastępstwa kierowników',handover:'Zdanie sprz\u0119tu',permissions:'Moje uprawnienia',teamPermissions:'Uprawnienia mojego zespo\u0142u',teamReviews:'Przeglady zespolu',reviews:'Przeglady roczne',custodyInbox:'Odbiory i akceptacje',reports:'Moje zgłoszenia',admin:'Administracja',access:'Dostep do portalu',settings:'Ustawienia - Jira',notificationSettings:'SMTP i Teams',entitlementAdmin:'Źródła i opisy uprawnień',deployment:'Aktualizacje',audit:'Logi audytu',entra:'Ustawienia - Entra ID'})[name];
+  $('subtitle').textContent = ({assets:'Sprawdz przypisane elementy. Zglos sprzet, ktorego nie posiadasz.',team:'Zasoby bezposrednich i posrednich podwladnych.',delegations:'Nadawanie i cofanie zastępstw wglądu do zespołu.',handover:'Protok\u00f3\u0142 zdawczo-odbiorczy i zwrot sprz\u0119tu.',teamPermissions:'Dostepy bezposrednich i posrednich podwladnych.',permissions:'Przypisane dostepy do systemow i aplikacji.',reviews:'Coroczna inwentaryzacja sprzetu i przeglad uprawnien.',teamReviews:'Sprawdz terminowe potwierdzenia zespolu.',custodyInbox:'Potwierdzanie wydania i odbioru sprzetu.',reports:'Śledź decyzje dotyczące Twoich zgłoszeń.',admin:'Oceń zgłoszenia przed zmianą danych źródłowych.',access:'Zarzadzanie dostepem uzytkownikow i grup AD.',entra:'Polaczenie Microsoft Entra ID i dane organizacji.',settings:'Połączenie Jira, uprawnienia administratorów i zakres korekt.',notificationSettings:'Konfiguracja SMTP, Teams Workflows i terminow przegladow.',entitlementAdmin:'Konektory danych, opisy grup i reguły widoczności.',deployment:'Aktualizacja z GitHub oraz przywrocenie poprzedniej wersji.',audit:'Kto, kiedy i jaka operacje wykonal w portalu.'})[name];
+  message(''); if (name === 'team') loadTeam(); if(name==='delegations')loadDelegations(); if(name==='teamReviews')loadTeamReviewStatus(); if(name==='reviews')loadAnnualReviews(); if(name==='custodyInbox')loadCustodyInbox(); if(name==='notificationSettings')loadNotificationSettings(); if(name==='entitlementAdmin')loadEntitlementAdmin(); if(name==='permissions') loadMyPermissions(); if(name==='teamPermissions') loadTeamPermissions(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'handover' && typeof loadHandover === 'function') loadHandover(); if (name === 'settings') loadSettings(); if (name === 'deployment') loadDeployment(); if (name === 'audit') loadAudit(); if (name === 'access') loadAccess();
 }
 async function loadSettings() {
   try {
@@ -164,6 +164,7 @@ function hideProtectedViews() {
   for(const item of ['assets','team','delegations','handover','permissions','teamPermissions','teamReviews','reviews','custodyInbox','reports','admin','settings','notificationSettings','deployment','audit','entra','access']) $(item+'View').hidden=true;
   $('adminNav').hidden=$('settingsGroup').hidden=true;
   $('handoverNav').hidden=true;
+  $('entitlementAdminNav').hidden=true;
   $('delegationsNav').hidden=true;
 }
 async function signIn() {
@@ -182,6 +183,7 @@ async function signIn() {
       return;
     }
     $('teamNav').hidden=!me.manager;
+    $('entitlementAdminNav').hidden=!me.admin;
     $('delegationsNav').hidden=!me.manager;
     $('teamReviewsNav').hidden=!me.manager;
     document.querySelector('button[data-view="teamPermissions"]').hidden=!me.manager;
