@@ -52,9 +52,9 @@ async function loadAssets() {
     renderPersonalEquipment();
   } catch(e) { $('assets').innerHTML = `<p class="empty">Nie udało się pobrać zasobów. ${escapeHtml(e.message)}</p>`; }
 }
-function statusName(s) { return ({Pending:'Oczekuje',Applying:'W trakcie',Approved:'Zatwierdzone',Rejected:'Odrzucone',AppliedAuditPending:'Zmieniono w Jira - komentarz do weryfikacji',NeedsReview:'Wymagana weryfikacja Jira'})[s] || s; }
+function statusName(s) { return ({Pending:'Oczekuje',Applying:'W trakcie',Approved:'Zatwierdzone',Rejected:'Odrzucone',AppliedAuditPending:'Zmieniono w Jira - komentarz do weryfikacji',NeedsReview:'Wymagana weryfikacja Jira',NeedsRegistration:'Do rejestracji w Jira'})[s] || s; }
 function reportRow(r, admin) {
-  return `<article class="row"><div><h3>${escapeHtml(r.name)} <span class="key">${escapeHtml(r.key)}</span></h3><p><strong>${escapeHtml(({ 'not-held':'Nie posiadam tego sprzetu', 'employee-left':'Pracownik juz nie pracuje', assignment:'Nieprawidlowe przypisanie sprzetu' })[r.type] || r.attribute)}:</strong> ${escapeHtml(r.oldValue)} → ${escapeHtml(r.proposedValue)}</p><p>${escapeHtml(r.reason)}</p><p class="meta">${escapeHtml(r.reporter)}${r.affectedEmployee ? ' · Pracownik: ' + escapeHtml(r.affectedEmployee) : ''} · ${escapeHtml(new Date(r.createdAt).toLocaleString('pl-PL'))} · ${escapeHtml(r.source)}</p>${r.jiraCommentId ? `<p class="meta">Jira comment ID: ${escapeHtml(r.jiraCommentId)}</p>` : ''}${r.jiraAuditError ? `<p class="meta">Uwaga: ${escapeHtml(r.jiraAuditError)}</p>` : ''}</div>${admin && r.status === 'Pending' ? `<div class="decision"><button data-decision="approve" data-id="${r.id}">Zatwierdź</button><button class="reject" data-decision="reject" data-id="${r.id}">Odrzuć</button></div>` : `<span class="badge ${escapeHtml(r.status)}">${escapeHtml(statusName(r.status))}</span>`}</article>`;
+  return `<article class="row"><div><h3>${escapeHtml(r.name)} <span class="key">${escapeHtml(r.key)}</span></h3><p><strong>${escapeHtml(({ 'not-held':'Nie posiadam tego sprzetu', 'employee-left':'Pracownik juz nie pracuje', assignment:'Nieprawidlowe przypisanie sprzetu', discovered:'Ujawniony dodatkowy sprzęt' })[r.type] || r.attribute)}:</strong> ${escapeHtml(r.oldValue)} → ${escapeHtml(r.proposedValue)}</p><p>${escapeHtml(r.reason)}</p>${r.type === "discovered" ? `<p class="meta">Typ: ${escapeHtml(r.equipmentType)} · S/N: ${escapeHtml(r.serialNumber || "nie podano")} · Etykieta: ${escapeHtml(r.assetTag || "nie podano")} · wymaga ręcznej weryfikacji</p>` : ""}<p class="meta">${escapeHtml(r.reporter)}${r.affectedEmployee ? ' · Pracownik: ' + escapeHtml(r.affectedEmployee) : ''} · ${escapeHtml(new Date(r.createdAt).toLocaleString('pl-PL'))} · ${escapeHtml(r.source)}</p>${r.jiraCommentId ? `<p class="meta">Jira comment ID: ${escapeHtml(r.jiraCommentId)}</p>` : ''}${r.jiraAuditError ? `<p class="meta">Uwaga: ${escapeHtml(r.jiraAuditError)}</p>` : ''}</div>${admin && r.status === 'Pending' ? `<div class="decision"><button data-decision="approve" data-id="${r.id}">${r.type === 'discovered' ? 'Przyjmij do rejestracji' : 'Zatwierdź'}</button><button class="reject" data-decision="reject" data-id="${r.id}">Odrzuć</button></div>` : `<span class="badge ${escapeHtml(r.status)}">${escapeHtml(statusName(r.status))}</span>`}</article>`;
 }
 async function loadReports() {
   try {
@@ -106,7 +106,7 @@ $('reportForm').addEventListener('submit', async e => {
 });
 $('adminReports').addEventListener('click', async e => {
   const b = e.target.closest('[data-decision]'); if (!b) return;
-  const action = b.dataset.decision; if (!confirm(action === 'approve' ? 'Zatwierdzic zgloszenie i zapisac zmiane w Jira?' : 'Odrzucić zgłoszenie?')) return;
+  const action = b.dataset.decision; if (!confirm(action === 'approve' ? 'Przyjąć zgłoszenie? Jeśli dotyczy dodatkowego sprzętu, oznacza to wyłącznie ręczną weryfikację i rejestrację — bez automatycznych zmian w Jira.' : 'Odrzucić zgłoszenie?')) return;
   b.disabled = true; try { await api(`/api/reports/${b.dataset.id}/decision`,{method:'POST',body:JSON.stringify({action})}); await loadReports(); await loadAssets(); await loadTeam(true); message('Decyzja została zapisana.'); } catch(err) { await loadReports(); message(err.message,true); b.disabled = false; }
 });
 $('refresh').onclick = loadAssets; $('refreshAdmin').onclick = loadReports;
@@ -275,4 +275,74 @@ async function loadAudit() {
 $('auditRefresh').addEventListener('click', loadAudit);
 $('auditExport').addEventListener('click', () => {
   window.location.href = new URL('api/admin/audit/export?' + auditQuery(), appBase).href;
+});
+
+
+// Device discovery must not require a pre-existing Jira asset ID.
+// Scope is verified independently in POST /api/reports/discovered.
+async function openDiscoveryDialog(scope) {
+  if (!me?.allowed) return;
+  const select = $('discoveredEmployee');
+  select.innerHTML = '';
+  if (scope === 'team') {
+    if (!me.manager) return;
+    if (!teamLoaded) await loadTeam(true);
+    const people = typeof teamVisiblePeople === 'function' ? teamVisiblePeople() : teamPeople;
+    if (!people.length) {
+      message('Nie znaleziono pracowników w zespole. Sprawdź hierarchię AD.', true);
+      return;
+    }
+    for (const person of people) {
+      const option = new Option(person.name + ' (' + person.id + ')', person.id);
+      select.add(option);
+    }
+    if (typeof selectedPerson === 'string' && people.some(p => p.id === selectedPerson))
+      select.value = selectedPerson;
+    $('discoveredEmployeeLabel').hidden = false;
+  } else {
+    select.add(new Option(me.name, me.name));
+    $('discoveredEmployeeLabel').hidden = false;
+  }
+  $('discoveredForm').reset();
+  // Reset preserves the correct selected option only after its own options are set.
+  if (scope === 'team' && typeof selectedPerson === 'string' && [...select.options].some(o => o.value === selectedPerson))
+    select.value = selectedPerson;
+  $('discoveredDialog').showModal();
+}
+$('discloseMyAsset').addEventListener('click', () => openDiscoveryDialog('self'));
+$('discloseTeamAsset').addEventListener('click', () => openDiscoveryDialog('team'));
+$('discoveredClose').onclick = $('discoveredCancel').onclick = () => $('discoveredDialog').close();
+$('discoveredForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const serial = $('discoveredSerial').value.trim();
+  const assetTag = $('discoveredTag').value.trim();
+  const description = $('discoveredDescription').value.trim();
+  if (!serial && !assetTag) {
+    message('Podaj numer seryjny lub identyfikator urządzenia.', true);
+    return;
+  }
+  if (description.length < 10) {
+    message('Opis musi mieć co najmniej 10 znaków.', true);
+    return;
+  }
+  const button = $('discoveredSubmit');
+  button.disabled = true;
+  try {
+    const payload = {
+      employeeLogin: $('discoveredEmployee').value,
+      equipmentType: $('discoveredType').value,
+      name: $('discoveredName').value.trim(),
+      serial, assetTag, description
+    };
+    await api('/api/reports/discovered', {
+      method:'POST', body:JSON.stringify(payload)
+    });
+    $('discoveredDialog').close();
+    view('reports');
+    message('Dodatkowy sprzęt został zgłoszony. Administrator zweryfikuje go przed wpisaniem do Jira.');
+  } catch (err) {
+    message(err.message, true);
+  } finally {
+    button.disabled = false;
+  }
 });
