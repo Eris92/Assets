@@ -60,7 +60,7 @@ async function loadReports() {
   try {
     const rows = await api('/api/reports');
     $('reports').innerHTML = rows.filter(r => r.reporter.toLowerCase() === me.name.toLowerCase()).map(r => reportRow(r,false)).join('') || '<p class="empty">Nie masz jeszcze zgłoszeń.</p>';
-    if (me.admin) { $('adminReports').innerHTML = rows.map(r => reportRow(r,true)).join('') || '<p class="empty">Brak zgłoszeń.</p>'; const count = rows.filter(r => r.status === 'Pending').length; $('pendingCount').textContent = String(count); }
+    if (me.admin) { $('adminReports').innerHTML = rows.map(r => reportRow(r,true)).join('') || '<p class="empty">Brak zgłoszeń.</p>'; const count = rows.filter(r => r.status === 'Pending' || r.status === 'NeedsRegistration').length; $('pendingCount').textContent = String(count); }
   } catch(e) { message(e.message,true); }
 }
 $('permissionsNav').addEventListener('click', () => {

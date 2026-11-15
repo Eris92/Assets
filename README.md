@@ -2,6 +2,16 @@
 
 Workflow and legal notes: [custody evidence, delegation, reviews and notifications](docs/Asset-Custody-Evidence.md).
 
+## Ujawnienie dodatkowego sprzętu
+W widokach **Mój sprzęt** i **Sprzęt mojego zespołu** znajduje się przycisk
+zgłaszania urządzeń niewidocznych w Jira. Zgłaszający podaje typ/model,
+numer seryjny lub oznaczenie, miejsce przechowywania i komentarz.
+Dla zespołu można wybrać wyłącznie pracownika w aktualnie autoryzowanym
+zakresie kierownika albo zastępcy (weryfikowane również po stronie API).
+Zgłoszenie zapisuje się w kolejce Administracja jako `discovered`.
+Akceptacja ustawia stan `NeedsRegistration` **bez wykonywania Jira PUT**.
+Wpis nie oznacza jeszcze, że urządzenie zostało zarejestrowane w Jira.
+
 ## Handover and assigned-asset visibility
 
 Regular /api/assets reads are filtered only by the authenticated Windows

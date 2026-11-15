@@ -1245,7 +1245,8 @@ app.MapPost("/api/reports/discovered", async (HttpContext ctx, IAntiforgery anti
     if (name.Length is < 2 or > 120 || type.Length is < 2 or > 80 ||
         serial.Length > 120 || tag.Length > 120 || description.Length is < 10 or > 2000 ||
         employee.Length is < 1 or > 256 || (serial.Length == 0 && tag.Length == 0) ||
-        new[] { name, type, serial, tag, description, employee }.Any(HasBadControl)) {
+        new[] { name, type, serial, tag, employee }.Any(HasBadControl) ||
+        description.Any(c => char.IsControl(c) && c is not ('\r' or '\n' or '\t'))) {
         return Results.BadRequest(new { error = "Podaj typ, nazwe, numer seryjny lub identyfikator oraz opis (minimum 10 znakow)." });
     }
     var actor = ctx.User.Identity.Name!;
