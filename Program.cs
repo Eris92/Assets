@@ -805,10 +805,23 @@ async Task<(string Hash,string Json,object Items)> ReadReviewSnapshot(ClaimsPrin
         return (Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))).ToLowerInvariant(),json,display);
     }
     if(kind=="permissions") {
-        var groups=await Task.Run(()=>HandoverDirectory.DirectGroups(actor.Identity!.Name!),token);
-        var sorted=groups.OrderBy(x=>x,StringComparer.OrdinalIgnoreCase).ToArray();
-        var json=JsonSerializer.Serialize(sorted);
-        return (Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))).ToLowerInvariant(),json,sorted);
+        var inventory=await ReadEntitlementInventory(actor.Identity!.Name!,false,token);
+        // Never allow an annual confirmation if the mandatory on-prem
+        // source is unavailable. Connected optional sources are included.
+        if(!inventory.Sources.TryGetValue(EntitlementCatalog.LocalAD,out var adState) ||
+           !adState.StartsWith("Connected",StringComparison.Ordinal))
+            throw new InvalidOperationException("AD entitlements could not be fully verified.");
+        var normalized=inventory.Items.Select(x=>new {
+            x.Source,x.Key,x.Name,x.Kind,x.Details,x.Via,x.Note
+        }).OrderBy(x=>x.Source,StringComparer.Ordinal)
+          .ThenBy(x=>x.Key,StringComparer.Ordinal).ToArray();
+        var sourceManifest=inventory.Sources.OrderBy(x=>x.Key,StringComparer.Ordinal)
+            .Select(x=>new {x.Key,x.Value}).ToArray();
+        // The evidence manifest records which sources were connected or
+        // unavailable at review time. No volatile Graph fetched-at values.
+        var json=JsonSerializer.Serialize(new {items=normalized,sources=sourceManifest});
+        return (Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))).ToLowerInvariant(),
+            json,normalized);
     }
     throw new ArgumentException("Invalid annual review type");
 }

@@ -46,7 +46,8 @@ async function openReviewSnapshot(kind,discrepancy){
  }
  const items=Array.isArray(snapshot.items)?snapshot.items:[];
  const list=items.map((x,i)=>{
-   const text=kind==='assets' ? [x.key,x.name,x.type,x.serial].filter(Boolean).join(' · ') : String(x);
+   const text=kind==='assets' ? [x.key,x.name,x.type,x.serial].filter(Boolean).join(' · ') :
+     [x.source,x.name,x.kind,x.note].filter(Boolean).join(' · ');
    return '<label style="display:flex;align-items:center;gap:8px;margin:7px 0;font-size:13px">'+
      '<input data-review-item="'+i+'" type="checkbox" style="width:18px;flex:0 0 18px">'+
      '<span>'+escapeHtml(text)+'</span></label>';
