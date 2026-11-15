@@ -1213,6 +1213,17 @@ app.MapGet("/api/permissions", async (HttpContext ctx) => {
         return Results.Problem("Nie mozna odczytac uprawnien AD.",statusCode:502);
     }
 });
+// AD reporting hierarchy without Jira dependency. Only the current manager and
+// explicitly delegated team viewers can retrieve these Windows logins.
+app.MapGet("/api/team/members", (HttpContext ctx) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    if (!access.Check(ctx.User).Allowed) return Results.Forbid();
+    var items = EffectiveTeam(ctx.User.Identity.Name!);
+    if (items.Length == 0) return Results.Forbid();
+    return Results.Ok(items.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+        .Select(p => new { login = p.Login, name = p.Name, role = p.Role }).ToArray());
+});
+
 app.MapGet("/api/team/permissions", async (HttpContext ctx,string? login) => {
     if (ctx.User.Identity?.IsAuthenticated!=true) return Results.Unauthorized();
     if (string.IsNullOrWhiteSpace(login) || login.Length>256) return Results.BadRequest();
