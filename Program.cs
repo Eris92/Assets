@@ -1207,7 +1207,7 @@ app.MapDelete("/api/team/delegations/{id:long}", async (HttpContext ctx, IAntifo
 
 // Returns only the current Windows user's entitlements or their effective
 // AD team scope. Hidden entries are filtered ON THE SERVER, not via CSS.
-async Task<object> ReadEntitlementInventory(string login,bool isAdmin,CancellationToken ct) {
+async Task<EntitlementInventoryResponse> ReadEntitlementInventory(string login,bool isAdmin,CancellationToken ct) {
     var entries=new List<EntitlementItem>();
     var status=new Dictionary<string,string>(StringComparer.Ordinal) {
         [EntitlementCatalog.LocalAD]="Not loaded",
@@ -1262,21 +1262,21 @@ async Task<object> ReadEntitlementInventory(string login,bool isAdmin,Cancellati
         }
     }
     var metadata=entitlements.MetadataAll();
-    var list=new List<object>();
+    var list=new List<EntitlementDisplay>();
     foreach(var entry in entries.DistinctBy(e=>e.Source+"\n"+e.Key,
              StringComparer.OrdinalIgnoreCase)) {
         var key=entry.Source+"\n"+entry.Key;
         metadata.TryGetValue(key,out var m);
         if(m?.Hidden==true&&!isAdmin)continue;
-        list.Add(new {entry.Source,entry.Key,entry.Name,entry.Kind,
+        list.Add(new EntitlementDisplay(entry.Source,entry.Key,entry.Name,entry.Kind,
             entry.Details,entry.Via,entry.UserLogin,entry.CapturedAt,
-            note=m?.Note??"",hidden=m?.Hidden??false,
-            stale=DateTimeOffset.TryParse(entry.CapturedAt,out var stamp) &&
-               DateTimeOffset.UtcNow-stamp>TimeSpan.FromDays(7),
-            visibility=isAdmin?(m?.Hidden==true?"Admin only":"User visible"):"User visible"});
+            m?.Note??"",m?.Hidden??false,
+            DateTimeOffset.TryParse(entry.CapturedAt,out var stamp) &&
+                DateTimeOffset.UtcNow-stamp>TimeSpan.FromDays(7),
+            isAdmin?(m?.Hidden==true?"Admin only":"User visible"):"User visible"));
     }
-    return new { login, items=list, sources=status,
-        warning="Not an exhaustive effective-access report: SharePoint item rights, nested on-prem ACLs and Exchange delegate rights require their source collectors." };
+    return new EntitlementInventoryResponse(login,list.ToArray(),status,
+        "Not an exhaustive effective-access report: SharePoint item rights, nested on-prem ACLs and Exchange delegate rights require their source collectors.");
 }
 app.MapGet("/api/entitlements", async (HttpContext ctx,string? login) => {
     if(ctx.User.Identity?.IsAuthenticated!=true)return Results.Unauthorized();
@@ -1293,6 +1293,63 @@ app.MapGet("/api/entitlements", async (HttpContext ctx,string? login) => {
     catch(Exception ex) {
         app.Logger.LogError(ex,"Entitlement inventory failed");
         return Results.Problem("Nie mozna pobrac ewidencji uprawnien.",statusCode:502);
+    }
+}).RequireRateLimiting("handoverSearch");
+
+// A stable reference to an entitlement is validated against current source
+// inventory; a reported privilege MUST remain in the user's authorized scope.
+// A report is never a request to perform automatic AD/Entra/EXO modification.
+app.MapPost("/api/reports/entitlements",async(HttpContext ctx,IAntiforgery anti,
+    EntitlementReportInput input) => {
+    if(ctx.User.Identity?.IsAuthenticated!=true)return Results.Unauthorized();
+    if(!access.Check(ctx.User).Allowed)return Results.Forbid();
+    await anti.ValidateRequestAsync(ctx);
+    var actor=ctx.User.Identity.Name!;
+    var target=input.EmployeeLogin?.Trim()??"";
+    if(target.Length==0||target.Length>256||target.Any(char.IsControl) ||
+       !EntitlementCatalog.ValidItem(input.Source??"",input.Key??"") ||
+       input.Kind is not ("unneeded" or "excessive") ||
+       string.IsNullOrWhiteSpace(input.Reason) ||
+       input.Reason.Length is <10 or >2000)
+        return Results.BadRequest(new{error="Invalid entitlement report"});
+    if(!target.Equals(actor,StringComparison.OrdinalIgnoreCase) &&
+       !EffectiveTeam(actor).Any(p=>p.Login.Equals(target,StringComparison.OrdinalIgnoreCase)))
+        return Results.Forbid();
+    try {
+        var inventory=await ReadEntitlementInventory(target,false,ctx.RequestAborted);
+        var row=inventory.Items.FirstOrDefault(x=>
+            x.Source==input.Source && x.Key.Equals(input.Key,StringComparison.OrdinalIgnoreCase));
+        if(row is null)return Results.Conflict(new{
+            error="Nie znaleziono aktywnego uprawnienia w widocznej ewidencji. Odswiez dane."});
+        using var db=new SqliteConnection(ConnectionString());db.Open();
+        using var cmd=db.CreateCommand();
+        cmd.CommandText="""
+            INSERT INTO Reports(Source,ObjectId,ObjectKey,ObjectName,AttributeId,AttributeName,
+                OldValue,ProposedValue,Reason,Reporter,CreatedAt,Status,Type,AffectedEmployee,SourceSnapshot)
+            VALUES($source,'',$key,$name,'','Access review',$old,'',$reason,$reporter,
+                $at,'Pending',$type,$employee,$snapshot)
+            """;
+        cmd.Parameters.AddWithValue("$source",row.Source);
+        cmd.Parameters.AddWithValue("$key",row.Key);
+        cmd.Parameters.AddWithValue("$name",row.Name);
+        cmd.Parameters.AddWithValue("$old",row.Details);
+        cmd.Parameters.AddWithValue("$reason",input.Reason.Trim());
+        cmd.Parameters.AddWithValue("$reporter",actor);
+        cmd.Parameters.AddWithValue("$at",DateTimeOffset.UtcNow.ToString("O"));
+        cmd.Parameters.AddWithValue("$type","permission-"+input.Kind);
+        cmd.Parameters.AddWithValue("$employee",target);
+        cmd.Parameters.AddWithValue("$snapshot",
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(row.Source+"\n"+
+                row.Key+"\n"+row.CapturedAt))).ToLowerInvariant());
+        cmd.ExecuteNonQuery();
+        using var identity=db.CreateCommand();identity.CommandText="SELECT last_insert_rowid()";
+        var id=(long)identity.ExecuteScalar()!;
+        audit.Write(actor,"Server","Entitlement.Report","Report:"+id,"PendingManualReview",
+            ctx.Connection.RemoteIpAddress?.ToString(),ctx.TraceIdentifier,201);
+        return Results.Created("/api/reports/"+id,new{id,status="Pending",accessChanged=false});
+    }catch(Exception ex) {
+        app.Logger.LogError(ex,"Entitlement report validation failed");
+        return Results.Problem("Nie mozna zweryfikowac uprawnienia w zrodlach.",statusCode:502);
     }
 }).RequireRateLimiting("handoverSearch");
 

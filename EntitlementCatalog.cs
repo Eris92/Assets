@@ -3,6 +3,14 @@ using Microsoft.Data.Sqlite;
 internal sealed record EntitlementItem(
     string Source, string Key, string Name, string Kind, string Details,
     string Via, string UserLogin, string CapturedAt, string Evidence = "");
+internal sealed record EntitlementDisplay(
+    string Source,string Key,string Name,string Kind,string Details,string Via,
+    string UserLogin,string CapturedAt,string Note,bool Hidden,bool Stale,string Visibility);
+internal sealed record EntitlementInventoryResponse(
+    string Login,EntitlementDisplay[] Items,Dictionary<string,string> Sources,string Warning);
+internal sealed record EntitlementReportInput(
+    string EmployeeLogin,string Source,string Key,string Kind,string Reason);
+
 internal sealed record EntitlementMetadata(
     string Source, string Key, string Note, bool Hidden, string UpdatedAt, string UpdatedBy);
 internal sealed record EntitlementImportInput(
