@@ -1206,7 +1206,7 @@ app.MapDelete("/api/team/delegations/{id:long}", async (HttpContext ctx, IAntifo
 app.MapGet("/api/permissions", async (HttpContext ctx) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     try {
-        var groups=await Task.Run(()=>HandoverDirectory.DirectGroups(ctx.User.Identity.Name!),ctx.RequestAborted);
+        var groups=await Task.Run(()=>HandoverDirectory.DirectGroupEntries(ctx.User.Identity.Name!),ctx.RequestAborted);
         return Results.Ok(new{login=ctx.User.Identity.Name, source="AD direct memberOf",groups});
     } catch(Exception ex) {
         app.Logger.LogError(ex,"AD groups lookup failed");
@@ -1220,7 +1220,7 @@ app.MapGet("/api/team/permissions", async (HttpContext ctx,string? login) => {
         x.Login.Equals(login,StringComparison.OrdinalIgnoreCase));
     if(target is null)return Results.Forbid();
     try {
-        var groups=await Task.Run(()=>HandoverDirectory.DirectGroups(target.Login),ctx.RequestAborted);
+        var groups=await Task.Run(()=>HandoverDirectory.DirectGroupEntries(target.Login),ctx.RequestAborted);
         return Results.Ok(new { login=target.Login,name=target.Name,source="AD direct memberOf",groups });
     } catch(Exception ex) {
         app.Logger.LogError(ex,"Team AD groups lookup failed");
@@ -1231,6 +1231,117 @@ app.MapGet("/api/team/permissions", async (HttpContext ctx,string? login) => {
 // A separate self-disclosure flow for devices not listed in Jira Assets.
 // Do not require an existing ObjectId and NEVER write to Jira on acceptance.
 // EmployeeLogin is authorized by the server (self or effective direct/delegated team).
+// List direct AD groups by current delegated manager scope, 10 users per page.
+// The client clearly labels that flat filtering covers loaded rows only.
+app.MapGet("/api/team/permissions/all", async (HttpContext ctx, int? offset) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    if (!access.Check(ctx.User).Allowed) return Results.Forbid();
+    var current = Math.Max(0, offset ?? 0);
+    var people = EffectiveTeam(ctx.User.Identity.Name!)
+        .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+    if (people.Length == 0) return Results.Forbid();
+    if (current > people.Length) return Results.BadRequest(new { error = "Invalid page offset" });
+    var page = people.Skip(current).Take(10).ToArray();
+    var result = new System.Collections.Concurrent.ConcurrentBag<object>();
+    var failures = new System.Collections.Concurrent.ConcurrentBag<string>();
+    using var throttle = new SemaphoreSlim(3);
+    await Task.WhenAll(page.Select(async person => {
+        await throttle.WaitAsync(ctx.RequestAborted);
+        try {
+            var groups = await Task.Run(() => HandoverDirectory.DirectGroupEntries(person.Login),
+                ctx.RequestAborted);
+            foreach (var group in groups)
+                result.Add(new { login = person.Login, person = person.Name, id = group.Id,
+                    name = group.Name, source = "AD memberOf" });
+        } catch (Exception ex) {
+            app.Logger.LogWarning(ex, "Team AD group listing failed for authorized member");
+            failures.Add(person.Login);
+        } finally { throttle.Release(); }
+    }));
+    if (!failures.IsEmpty) return Results.Problem(
+        "Nie udalo sie odczytac uprawnien wszystkich pracownikow. Nie pokazano niepelnej strony.",
+        statusCode: 502);
+    return Results.Ok(new {
+        peopleLoaded = page.Length, totalPeople = people.Length,
+        nextOffset = current + page.Length < people.Length ? (int?)(current + page.Length) : null,
+        items = result.OrderBy(x => System.Text.Json.JsonSerializer.Serialize(x)).ToArray()
+    });
+}).RequireRateLimiting("handoverSearch");
+
+// Report unnecessary, excessive or otherwise undisclosed app access. This is
+// human-triaged, not automated AD/Entra privilege modification.
+app.MapPost("/api/reports/permissions", async (HttpContext ctx, IAntiforgery anti,
+    PermissionReportInput input) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    if (!access.Check(ctx.User).Allowed) return Results.Forbid();
+    await anti.ValidateRequestAsync(ctx);
+    static bool Valid(string? s, int max, int min = 0) =>
+        s is not null && s.Length >= min && s.Length <= max &&
+        !s.Any(c => char.IsControl(c) && c is not ('\r' or '\n' or '\t'));
+    var kind = input.Kind?.Trim() ?? "";
+    var employee = input.EmployeeLogin?.Trim() ?? "";
+    var groupDn = input.GroupDn?.Trim() ?? "";
+    var external = input.ExternalAccess?.Trim() ?? "";
+    var reason = input.Reason?.Trim() ?? "";
+    if (kind is not ("unneeded" or "excessive" or "unlisted") ||
+        !Valid(employee, 256, 1) || !Valid(reason, 2000, 10) ||
+        !Valid(groupDn, 2048) || !Valid(external, 160) ||
+        (kind == "unlisted" && external.Length < 3) ||
+        (kind != "unlisted" && groupDn.Length < 4))
+        return Results.BadRequest(new { error = "Invalid entitlement report input" });
+    var actor = ctx.User.Identity.Name!;
+    var own = string.Equals(employee, actor, StringComparison.OrdinalIgnoreCase);
+    var subordinate = own ? null : EffectiveTeam(actor).FirstOrDefault(p =>
+        string.Equals(p.Login, employee, StringComparison.OrdinalIgnoreCase));
+    if (!own && subordinate is null) return Results.Forbid();
+    var targetLogin = own ? actor : subordinate!.Login;
+    DirectoryGroup? reportedGroup = null;
+    if (kind != "unlisted") {
+        try {
+            var groups = await Task.Run(() => HandoverDirectory.DirectGroupEntries(targetLogin),
+                ctx.RequestAborted);
+            reportedGroup = groups.FirstOrDefault(g =>
+                g.Id.Equals(groupDn, StringComparison.OrdinalIgnoreCase));
+            if (reportedGroup is null)
+                return Results.Conflict(new { error =
+                    "To czlonkostwo nie jest juz bezposrednio przypisane w AD. Odswiez uprawnienia." });
+        } catch (Exception ex) {
+            app.Logger.LogError(ex, "AD permission report membership verification failed");
+            return Results.Problem("Nie mozna zweryfikowac czlonkostwa w AD.", statusCode: 502);
+        }
+    }
+    using var db = new SqliteConnection(ConnectionString());
+    db.Open();
+    using var cmd = db.CreateCommand();
+    cmd.CommandText = """
+        INSERT INTO Reports (Source,ObjectId,ObjectKey,ObjectName,AttributeId,AttributeName,
+          OldValue,ProposedValue,Reason,Reporter,CreatedAt,Status,Type,AffectedEmployee,SourceSnapshot)
+        VALUES ($source,'',$key,$name,'','Uprawnienie',
+          $old,'',$reason,$reporter,$time,'Pending',$type,$employee,$snapshot)
+        """;
+    var label = reportedGroup?.Name ?? external;
+    cmd.Parameters.AddWithValue("$source", kind == "unlisted" ? "UserDisclosure" : "AD memberOf");
+    cmd.Parameters.AddWithValue("$key", kind == "unlisted" ? "INNY-DOSTEP" : "AD");
+    cmd.Parameters.AddWithValue("$name", label);
+    cmd.Parameters.AddWithValue("$old", reportedGroup?.Id ?? external);
+    cmd.Parameters.AddWithValue("$reason", reason);
+    cmd.Parameters.AddWithValue("$reporter", actor);
+    cmd.Parameters.AddWithValue("$time", DateTimeOffset.UtcNow.ToString("O"));
+    cmd.Parameters.AddWithValue("$type", "permission-" + kind);
+    cmd.Parameters.AddWithValue("$employee", targetLogin);
+    cmd.Parameters.AddWithValue("$snapshot", reportedGroup is null ? "" :
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(reportedGroup.Id))).ToLowerInvariant());
+    cmd.ExecuteNonQuery();
+    using var idQuery = db.CreateCommand();
+    idQuery.CommandText = "SELECT last_insert_rowid()";
+    var id = (long)idQuery.ExecuteScalar()!;
+    audit.Write(actor, "Server", "Permission.Report", "Report:" + id,
+        "PendingManualReview", ctx.Connection.RemoteIpAddress?.ToString(),
+        ctx.TraceIdentifier, 201);
+    return Results.Created("/api/reports/" + id,
+        new { id, status = "Pending", requiresManualReview = true, adModified = false });
+}).RequireRateLimiting("handoverSearch");
+
 app.MapPost("/api/reports/discovered", async (HttpContext ctx, IAntiforgery anti, DiscoveredEquipmentInput input) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     if (!access.Check(ctx.User).Allowed) return Results.Forbid();
@@ -1407,6 +1518,26 @@ app.MapPost("/api/reports/{id:long}/decision", async (HttpContext ctx, IAntiforg
     var reporter = reader.GetString(10);
     reader.Close();
     if (status != "Pending") return Results.Conflict(new { error = $"Report is {status}; no replay is permitted" });
+    if (reportType.StartsWith("permission-", StringComparison.Ordinal)) {
+        // A declaration is not authority to change AD/Entra rights. Human owner
+        // approval and a separate least-privilege change process are mandatory.
+        var result = input.Action == "approve" ? "NeedsAccessReview" : "Rejected";
+        using var update = db.CreateCommand();
+        update.CommandText = """
+            UPDATE Reports SET Status=$status,DecidedBy=$actor,DecidedAt=$at
+            WHERE Id=$id AND Status='Pending'
+            """;
+        update.Parameters.AddWithValue("$status", result);
+        update.Parameters.AddWithValue("$actor", ctx.User.Identity!.Name!);
+        update.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("O"));
+        update.Parameters.AddWithValue("$id", id);
+        if (update.ExecuteNonQuery() != 1) return Results.Conflict(new { error = "Already processed" });
+        audit.Write(ctx.User.Identity.Name!, "Server", "Permission.Decision",
+            "Report:" + id, result, ctx.Connection.RemoteIpAddress?.ToString(),
+            ctx.TraceIdentifier, 200);
+        return Results.Ok(new { status = result, needsManualAccessReview = result == "NeedsAccessReview",
+            adModified = false });
+    }
     if (reportType == "discovered") {
         // Approval means accepting the declaration for manual inventory verification.
         // No Jira object exists yet: do not invoke Jira GET/PUT or claim automatic registration.
@@ -1531,6 +1662,8 @@ record ClickInput(string Target, string? View);
 record ReportInput(string ObjectId, string? AttributeId, string? ProposedValue, string? Reason, string? Type = null);
 record DiscoveredEquipmentInput(string EmployeeLogin, string EquipmentType, string Name,
     string? Serial, string? AssetTag, string? Description);
+record PermissionReportInput(string EmployeeLogin, string Kind, string? GroupDn,
+    string? ExternalAccess, string Reason);
 record TeamMember(string Login, string Name, string Manager, string? Role = null);
 record DecisionInput(string Action);
 record SettingsInput(string SiteUrl, string AccountEmail, string CloudId, string? WorkspaceId, string? Aql,
