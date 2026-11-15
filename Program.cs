@@ -102,7 +102,10 @@ using (var db = new SqliteConnection(ConnectionString())) {
         "JiraAuditState TEXT NOT NULL DEFAULT 'None'",
         "JiraCommentId TEXT NOT NULL DEFAULT ''",
         "JiraAuditError TEXT NOT NULL DEFAULT ''",
-        "AppliedAt TEXT NOT NULL DEFAULT ''"
+        "AppliedAt TEXT NOT NULL DEFAULT ''",
+        "DeclaredDeviceType TEXT NOT NULL DEFAULT ''",
+        "DeclaredSerial TEXT NOT NULL DEFAULT ''",
+        "DeclaredTag TEXT NOT NULL DEFAULT ''"
     }) {
         using var probe = db.CreateCommand();
         probe.CommandText = "SELECT name FROM pragma_table_info('Reports') WHERE name=$name";
@@ -1225,6 +1228,66 @@ app.MapGet("/api/team/permissions", async (HttpContext ctx,string? login) => {
     }
 });
 
+// A separate self-disclosure flow for devices not listed in Jira Assets.
+// Do not require an existing ObjectId and NEVER write to Jira on acceptance.
+// EmployeeLogin is authorized by the server (self or effective direct/delegated team).
+app.MapPost("/api/reports/discovered", async (HttpContext ctx, IAntiforgery anti, DiscoveredEquipmentInput input) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    if (!access.Check(ctx.User).Allowed) return Results.Forbid();
+    await anti.ValidateRequestAsync(ctx);
+    static bool HasBadControl(string? value) => value?.Any(char.IsControl) ?? false;
+    var name = input.Name?.Trim() ?? "";
+    var type = input.EquipmentType?.Trim() ?? "";
+    var serial = input.Serial?.Trim() ?? "";
+    var tag = input.AssetTag?.Trim() ?? "";
+    var description = input.Description?.Trim() ?? "";
+    var employee = input.EmployeeLogin?.Trim() ?? "";
+    if (name.Length is < 2 or > 120 || type.Length is < 2 or > 80 ||
+        serial.Length > 120 || tag.Length > 120 || description.Length is < 10 or > 2000 ||
+        employee.Length is < 1 or > 256 || (serial.Length == 0 && tag.Length == 0) ||
+        new[] { name, type, serial, tag, description, employee }.Any(HasBadControl)) {
+        return Results.BadRequest(new { error = "Podaj typ, nazwe, numer seryjny lub identyfikator oraz opis (minimum 10 znakow)." });
+    }
+    var actor = ctx.User.Identity.Name!;
+    var targetIsSelf = string.Equals(employee, actor, StringComparison.OrdinalIgnoreCase);
+    var target = targetIsSelf ? null : EffectiveTeam(actor).FirstOrDefault(p =>
+        string.Equals(p.Login, employee, StringComparison.OrdinalIgnoreCase));
+    if (!targetIsSelf && target is null) return Results.Forbid();
+    var targetLogin = targetIsSelf ? actor : target!.Login;
+    using var db = new SqliteConnection(ConnectionString()); db.Open();
+    using var tx = db.BeginTransaction();
+    using var cmd = db.CreateCommand();
+    cmd.Transaction = tx;
+    cmd.CommandText = """
+        INSERT INTO Reports (Source,ObjectId,ObjectKey,ObjectName,AttributeId,AttributeName,
+          OldValue,ProposedValue,Reason,Reporter,CreatedAt,Status,Type,AffectedEmployee,SourceSnapshot,
+          DeclaredDeviceType,DeclaredSerial,DeclaredTag)
+        VALUES ('EmployeeDisclosure','', $key,$name,'','Dodatkowy sprzet',
+          'Brak na liscie', $proposed,$reason,$reporter,$at,'Pending','discovered',$employee,'',
+          $type,$serial,$tag)
+        """;
+    cmd.Parameters.AddWithValue("$key", string.IsNullOrWhiteSpace(tag) ? "NIEUJETY-W-JIRA" : tag);
+    cmd.Parameters.AddWithValue("$name", name);
+    cmd.Parameters.AddWithValue("$proposed", serial);
+    cmd.Parameters.AddWithValue("$reason", description);
+    cmd.Parameters.AddWithValue("$reporter", actor);
+    cmd.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("O"));
+    cmd.Parameters.AddWithValue("$employee", targetLogin);
+    cmd.Parameters.AddWithValue("$type", type);
+    cmd.Parameters.AddWithValue("$serial", serial);
+    cmd.Parameters.AddWithValue("$tag", tag);
+    cmd.ExecuteNonQuery();
+    using var idCommand = db.CreateCommand();
+    idCommand.Transaction = tx;
+    idCommand.CommandText = "SELECT last_insert_rowid()";
+    var id = (long)idCommand.ExecuteScalar()!;
+    tx.Commit();
+    audit.Write(actor, "Server", "Asset.Discovered", "Disclosure:" + id,
+        "PendingManualReview", ctx.Connection.RemoteIpAddress?.ToString(),
+        ctx.TraceIdentifier, 201);
+    return Results.Created("/api/reports/" + id, new { id, status = "Pending", requiresManualVerification = true });
+}).RequireRateLimiting("handoverSearch");
+
 app.MapPost("/api/reports", async (HttpContext ctx, IAntiforgery anti, ReportInput input) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     await anti.ValidateRequestAsync(ctx);
@@ -1291,7 +1354,10 @@ app.MapGet("/api/reports", (HttpContext ctx) => {
         jiraAuditState = reader.GetString(reader.GetOrdinal("JiraAuditState")),
         jiraCommentId = reader.GetString(reader.GetOrdinal("JiraCommentId")),
         jiraAuditError = reader.GetString(reader.GetOrdinal("JiraAuditError")),
-        appliedAt = reader.GetString(reader.GetOrdinal("AppliedAt")) });
+        appliedAt = reader.GetString(reader.GetOrdinal("AppliedAt")),
+        equipmentType = reader.GetString(reader.GetOrdinal("DeclaredDeviceType")),
+        serialNumber = reader.GetString(reader.GetOrdinal("DeclaredSerial")),
+        assetTag = reader.GetString(reader.GetOrdinal("DeclaredTag")) });
     return Results.Ok(rows);
 });
 
@@ -1340,6 +1406,29 @@ app.MapPost("/api/reports/{id:long}/decision", async (HttpContext ctx, IAntiforg
     var reporter = reader.GetString(10);
     reader.Close();
     if (status != "Pending") return Results.Conflict(new { error = $"Report is {status}; no replay is permitted" });
+    if (reportType == "discovered") {
+        // Approval means accepting the declaration for manual inventory verification.
+        // No Jira object exists yet: do not invoke Jira GET/PUT or claim automatic registration.
+        using var update = db.CreateCommand();
+        update.CommandText = """
+            UPDATE Reports SET Status=$status,DecidedBy=$by,DecidedAt=$at
+            WHERE Id=$id AND Status='Pending'
+            """;
+        update.Parameters.AddWithValue("$status", input.Action == "reject" ? "Rejected" : "NeedsRegistration");
+        update.Parameters.AddWithValue("$by", ctx.User.Identity!.Name!);
+        update.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("O"));
+        update.Parameters.AddWithValue("$id", id);
+        if (update.ExecuteNonQuery() != 1)
+            return Results.Conflict(new { error = "Report already processed" });
+        audit.Write(ctx.User.Identity.Name!, "Server", "Asset.DisclosureDecision",
+            "Disclosure:" + id, input.Action == "approve" ? "NeedsRegistration" : "Rejected",
+            ctx.Connection.RemoteIpAddress?.ToString(), ctx.TraceIdentifier, 200);
+        return Results.Ok(new {
+            status = input.Action == "approve" ? "NeedsRegistration" : "Rejected",
+            requiresManualRegistration = input.Action == "approve",
+            jiraModified = false
+        });
+    }
     var actor = ctx.User.Identity!.Name!;
     var timestamp = DateTimeOffset.UtcNow.ToString("O");
     using (var claim = db.CreateCommand()) {
@@ -1439,6 +1528,8 @@ record DelegateInput(string Login);
 record DeploymentInput(string? Action);
 record ClickInput(string Target, string? View);
 record ReportInput(string ObjectId, string? AttributeId, string? ProposedValue, string? Reason, string? Type = null);
+record DiscoveredEquipmentInput(string EmployeeLogin, string EquipmentType, string Name,
+    string? Serial, string? AssetTag, string? Description);
 record TeamMember(string Login, string Name, string Manager, string? Role = null);
 record DecisionInput(string Action);
 record SettingsInput(string SiteUrl, string AccountEmail, string CloudId, string? WorkspaceId, string? Aql,
