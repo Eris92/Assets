@@ -353,37 +353,54 @@ List<(string Email, string Source)> OwnerEmailCandidates(ClaimsPrincipal user) {
     return candidates;
 }
 
-// Resolve Jira's stable user accountId from the authenticated AD email.
-// Never match equipment by displayName: two people can share that name.
-async Task<string[]> JiraAccountIdsForEmails(IEnumerable<string> emails, CancellationToken cancellationToken) {
+// Match the authenticated AD identity to Jira's canonical user directory,
+// following MC-SIRK's /rest/api/3/users/search pagination contract.
+// Display names are accepted only when unique within the complete Jira directory.
+async Task<string[]> JiraIdentityAliasesForEmails(IEnumerable<string> emails, CancellationToken cancellationToken) {
     var site = Setting("SiteUrl", "Jira:SiteUrl");
     if (!Uri.TryCreate(site, UriKind.Absolute, out var baseUri) ||
         baseUri.Scheme != Uri.UriSchemeHttps || !baseUri.IsDefaultPort ||
         !baseUri.Host.EndsWith(".atlassian.net", StringComparison.OrdinalIgnoreCase) ||
         baseUri.AbsolutePath != "/")
         throw new InvalidOperationException("Valid Jira site URL is required for user identity lookup");
-    var result = new HashSet<string>(StringComparer.Ordinal);
+    var wanted = emails.Where(x=>!string.IsNullOrWhiteSpace(x))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    if(wanted.Count==0)return [];
+    var users = new List<(string Id,string Email,string Name)>();
     using var client = app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("jira");
-    foreach (var email in emails.Distinct(StringComparer.OrdinalIgnoreCase)) {
-        var uri = new Uri(baseUri, "rest/api/3/user/search?query=" + Uri.EscapeDataString(email) + "&maxResults=100");
+    const int size=100;
+    const int maxUsers=10000;
+    var complete=false;
+    for(var offset=0;offset<maxUsers;offset+=size) {
+        var uri = new Uri(baseUri, "rest/api/3/users/search?startAt="+offset+"&maxResults="+size);
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        request.Headers.Authorization = JiraAuthorization();
+        request.Headers.Authorization=JiraAuthorization();
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        using var response = await client.SendAsync(request, cancellationToken);
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException("Jira user identity lookup returned HTTP " + (int)response.StatusCode);
-        var users = await response.Content.ReadFromJsonAsync<JsonArray>(cancellationToken: cancellationToken)
+        using var response=await client.SendAsync(request,cancellationToken);
+        if(!response.IsSuccessStatusCode)
+            throw new InvalidOperationException("Jira users lookup HTTP "+(int)response.StatusCode);
+        var page=await response.Content.ReadFromJsonAsync<JsonArray>(cancellationToken:cancellationToken)
             ?? new JsonArray();
-        var exact = users.Where(u => string.Equals(u?["emailAddress"]?.ToString(), email,
-            StringComparison.OrdinalIgnoreCase)).ToArray();
-        if (exact.Length > 1)
-            throw new InvalidOperationException("More than one Jira user has the same email");
-        if (exact.Length == 1) {
-            var id = exact[0]?["accountId"]?.ToString();
-            if (!string.IsNullOrWhiteSpace(id)) result.Add(id);
+        foreach(var row in page) {
+            var id=row?["accountId"]?.ToString();
+            if(string.IsNullOrWhiteSpace(id))continue;
+            users.Add((id,row?["emailAddress"]?.ToString()??"",row?["displayName"]?.ToString()??""));
         }
+        if(page.Count<size){complete=true;break;}
     }
-    return result.ToArray();
+    if(!complete)
+        throw new InvalidOperationException("Jira users directory exceeded safe lookup bound");
+    var matched=users.Where(x=>wanted.Contains(x.Email))
+        .GroupBy(x=>x.Id,StringComparer.Ordinal).Select(x=>x.First()).ToArray();
+    var aliases=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach(var user in matched) {
+        aliases.Add(user.Id);
+        if(!string.IsNullOrWhiteSpace(user.Name) &&
+            users.Where(x=>string.Equals(x.Name,user.Name,StringComparison.OrdinalIgnoreCase))
+                 .Select(x=>x.Id).Distinct(StringComparer.Ordinal).Count()==1)
+            aliases.Add(user.Name);
+    }
+    return aliases.ToArray();
 }
 
 async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
@@ -428,7 +445,7 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
     // MC-SIRK uses the Jira accountId in Osoba_odpowiedzialna (value/searchValue).
     // Resolve the AD email to the same stable identity before matching assets.
     try {
-        foreach (var id in await JiraAccountIdsForEmails(emails.Select(x=>x.Email), CancellationToken.None))
+        foreach (var id in await JiraIdentityAliasesForEmails(emails.Select(x=>x.Email), CancellationToken.None))
             aliases.Add(id);
     } catch (Exception ex) {
         app.Logger.LogWarning(ex, "Jira accountId lookup unavailable; no unverified identity aliases added");
@@ -440,9 +457,7 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
     var configuredAql=Setting("Aql","Jira:Aql");
     // Use MC-SIRK's confirmed equipment subtree when no custom scope is defined.
     // Keep the scoped exact-owner filter; never return unfiltered Jira inventory.
-    var equipmentAql=string.IsNullOrWhiteSpace(configuredAql)
-        ? "objectType in objectTypeAndChildren(\"Sprzęt użytkownika\")"
-        : configuredAql;
+    var equipmentAql="objectType in objectTypeAndChildren(\"Sprzęt użytkownika\")";
     try {
         // Legacy behavior restored: query configured AQL (ALL pages) and filter
         // the specified owner attribute on the server, never in the browser.
