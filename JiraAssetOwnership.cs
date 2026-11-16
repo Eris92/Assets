@@ -18,13 +18,18 @@ internal static class JiraAssetOwnership {
     internal static bool Matches(JsonNode? obj,string ownerAttributeId,IEnumerable<string> aliases) {
         if(obj is null || string.IsNullOrWhiteSpace(ownerAttributeId))return false;
         if(obj["attributes"] is not JsonArray attrs)return false;
-        var owner=attrs.FirstOrDefault(a=>
-            a?["objectTypeAttributeId"]?.ToString()==ownerAttributeId);
-        if(owner is null)return false;
+        // Attribute IDs are defined per Jira object type. A laptop and a monitor
+        // can use different IDs for the same Osoba_odpowiedzialna field.
+        var ownerAttributes=attrs.Where(a=>
+            a?["objectTypeAttributeId"]?.ToString()==ownerAttributeId ||
+            string.Equals(a?["objectTypeAttribute"]?["name"]?.ToString(),
+                "Osoba_odpowiedzialna",StringComparison.OrdinalIgnoreCase)).ToArray();
+        if(ownerAttributes.Length==0)return false;
         var allowed=new HashSet<string>(aliases.Where(x=>!string.IsNullOrWhiteSpace(x)),
             StringComparer.OrdinalIgnoreCase);
         if(allowed.Count==0)return false;
-        foreach(var value in owner["objectAttributeValues"] as JsonArray ?? new JsonArray()) {
+        foreach(var owner in ownerAttributes)
+        foreach(var value in owner?["objectAttributeValues"] as JsonArray ?? new JsonArray()) {
             foreach(var candidate in Strings(value)) {
                 // Preserve old assets-portal behavior: Jira displayValue can
                 // contain a comma-separated list of assigned Windows logins.
