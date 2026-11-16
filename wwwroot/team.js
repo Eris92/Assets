@@ -1,4 +1,4 @@
-let teamPeople=[],teamEquipment=[],selectedPerson='',teamLoaded=false,teamDisplay='people',teamDelegations=[];
+let teamPeople=[],teamEquipment=[],selectedPerson='',teamLoaded=false,teamDisplay='people',teamDelegations=[],teamInventoryComplete=false,teamInventoryError='';
 function teamDepth(person){
   const visited=new Set();let depth=1,parent=person.manager;
   while(parent!=='me'){
@@ -17,16 +17,18 @@ function renderTeam(){
   const people=teamVisiblePeople();
   if(selectedPerson&&!people.some(p=>p.id===selectedPerson))selectedPerson='';
   const equipment=teamEquipment.filter(a=>people.some(p=>p.id===a.owner));
+  const missing=teamInventoryComplete?people.filter(p=>!equipment.some(a=>a.owner===p.id)):[];
   $('teamSummary').innerHTML=[['Pracownicy',people.length],
     ['Bezposredni',people.filter(p=>p.manager==='me').length],
     ['Posredni',people.filter(p=>p.manager!=='me').length],
-    ['Sprzet',equipment.length]].map(([label,value])=>
+    ['Sprzet',teamInventoryComplete?equipment.length:'?'],
+    ['Bez przypisanego sprzetu',teamInventoryComplete?missing.length:'?']].map(([label,value])=>
     '<div><strong>'+value+'</strong><span>'+label+'</span></div>').join('');
   $('teamTree').innerHTML='<h3>Struktura zespolu</h3>'+
     '<button data-person="" class="'+(!selectedPerson?'selected':'')+'">Caly zespol</button>'+
     people.map(p=>'<button style="padding-left:'+Math.min(60,14+(teamDepth(p)-1)*18)+'px" data-person="'+escapeHtml(p.id)+
       '" class="'+(selectedPerson===p.id?'selected':'')+'"><strong>'+escapeHtml(p.name)+
-      '</strong><small>'+escapeHtml(p.role||'')+'</small><small>'+
+      '</strong><small>'+escapeHtml(p.role||'')+'</small><small>'+ (!teamInventoryComplete?'Status sprzetu: niezweryfikowany':equipment.some(a=>a.owner===p.id)?'Sprzet przypisany: '+equipment.filter(a=>a.owner===p.id).length:'BRAK PRZYPISANEGO SPRZETU - sprawdz niezgodnosc')+'</small><small>'+ 
       (p.delegated?'Dostep w zastepstwie':p.manager==='me'?'Podlega bezposrednio':'Przelozony: '+escapeHtml(teamPeople.find(m=>m.id===p.manager)?.name||''))+
       '</small></button>').join('');
   $('teamSelection').textContent=selectedPerson?(people.find(p=>p.id===selectedPerson)?.name||''):'Wszyscy pracownicy';
@@ -40,6 +42,8 @@ function renderTeam(){
   $('teamDisplayMode').value=teamDisplay;
   $('teamLayout').classList.toggle('teamAllMode',teamDisplay==='all');
   renderEquipmentList('team','teamAssets',rows,false);
+  if(!teamInventoryComplete) $('teamAssets').insertAdjacentHTML('afterbegin','<p class="handoverNotice">Nie mozna potwierdzic przypisan sprzetu. '+escapeHtml(teamInventoryError||'Blad odczytu Jira.')+' Struktura pracownikow pozostaje widoczna.</p>');
+  else if(missing.length) $('teamAssets').insertAdjacentHTML('afterbegin','<p class="handoverNotice"><strong>'+missing.length+' pracownikow bez przypisanego sprzetu.</strong> Wybierz osobe w strukturze i zweryfikuj brak przypisania. W razie niezgodnosci uzyj przycisku zgloszenia dodatkowego sprzetu.</p>');
   if(!people.length)$('teamAssets').innerHTML='<p class="empty">Nie odnaleziono zespolu w AD (manager) ani team.json. Sprawdz hierarchie i konto uslugi.</p>';
 
 }
@@ -48,10 +52,10 @@ async function loadTeam(force=false){
     if(!teamLoaded||force){
       $('teamAssets').innerHTML='<p class="empty">Pobieranie sprzetu zespolu z Jira...</p>';
       const data=await api('/api/team');
-      teamPeople=data.people||[];teamEquipment=data.equipment||[];teamLoaded=true;
+      teamPeople=data.people||[];teamEquipment=data.equipment||[];teamInventoryComplete=data.inventoryComplete===true;teamInventoryError=data.inventoryError||'';teamLoaded=true;
     }
     renderTeam();
-  }catch(e){$('teamAssets').innerHTML='<p class="empty">'+escapeHtml(e.message)+'</p>'}
+  }catch(e){$('teamAssets').innerHTML='<p class="empty">'+escapeHtml(e.message)+'</p>';if(!teamLoaded){$('teamTree').innerHTML='<h3>Struktura zespolu</h3><p class="empty">Nie mozna odczytac hierarchii AD.</p>';}}
 }
 let teamCanManageDelegates=false;
 let delegationsGrantedToMe=[];
