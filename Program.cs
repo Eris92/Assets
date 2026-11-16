@@ -348,8 +348,8 @@ List<(string Email, string Source)> OwnerEmailCandidates(ClaimsPrincipal user) {
     } catch (InvalidOperationException) {
         if (candidates.Count == 0) throw;
     }
-    if (candidates.Count == 0)
-        throw new InvalidOperationException("Neither AD mail nor Windows fallback email could be resolved");
+    // An email is not required if a configured Jira scope can be filtered
+    // by the Windows login stored in OwnerAttributeId (the legacy behavior).
     return candidates;
 }
 
@@ -389,17 +389,45 @@ async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
 // Every candidate must originate from the authenticated Windows account.
 // Never perform a tenant-wide fallback that could leak other employees' assets.
 async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Matches)> QueryMyAssets(ClaimsPrincipal user) {
-    var rows = new Dictionary<string, JsonNode>(StringComparer.Ordinal);
-    var matches = new List<(string Email, string Source, int Count)>();
-    foreach (var candidate in OwnerEmailCandidates(user)) {
-        var owned = await QueryAssets(OwnerAqlForEmail(candidate.Email));
-        matches.Add((candidate.Email, candidate.Source, owned.Count));
-        foreach (var obj in owned) {
-            var id = obj["id"]?.ToString();
-            if (!string.IsNullOrWhiteSpace(id)) rows.TryAdd(id, obj);
+    var identity=user.Identity?.Name??throw new InvalidOperationException("Windows identity unavailable");
+    var emails=OwnerEmailCandidates(user);
+    var aliases=JiraAssetOwnership.Aliases(identity,emails.Select(x=>x.Email));
+    var rows=new Dictionary<string,JsonNode>(StringComparer.Ordinal);
+    var matches=new List<(string Email,string Source,int Count)>();
+    var ownerAttributeId=Setting("OwnerAttributeId","Jira:OwnerAttributeId") ??
+        throw new InvalidOperationException("OwnerAttributeId must be configured");
+    var configuredAql=Setting("Aql","Jira:Aql");
+    if(!string.IsNullOrWhiteSpace(configuredAql)) {
+        // Legacy behavior restored: query configured AQL (ALL pages) and filter
+        // the specified owner attribute on the server, never in the browser.
+        // This retains SAMAccountName / DOMAIN\sam mappings stored by Jira.
+        var scope=await QueryAssets(configuredAql);
+        var assigned=scope.Where(obj=>JiraAssetOwnership.Matches(obj,ownerAttributeId,aliases)).ToArray();
+        foreach(var obj in assigned) {
+            var id=obj["id"]?.ToString();
+            if(!string.IsNullOrWhiteSpace(id))rows.TryAdd(id,obj);
+        }
+        matches.Add((identity,"Configured AQL + owner attribute",assigned.Length));
+    }
+    // Also support the newer Jira Assets owner-reference query when available.
+    // If the configured legacy scope already works, failure of the optional
+    // email query must not hide the working result.
+    foreach(var candidate in emails) {
+        try {
+            var owned=await QueryAssets(OwnerAqlForEmail(candidate.Email));
+            foreach(var obj in owned) {
+                var id=obj["id"]?.ToString();
+                if(!string.IsNullOrWhiteSpace(id))rows.TryAdd(id,obj);
+            }
+            matches.Add((candidate.Email,candidate.Source,owned.Count));
+        } catch(Exception ex) when(!string.IsNullOrWhiteSpace(configuredAql)) {
+            app.Logger.LogWarning(ex,"Optional Jira owner-reference query failed for {Source}",candidate.Source);
+            matches.Add((candidate.Email,candidate.Source+" (unavailable)",0));
         }
     }
-    return (rows.Values.ToList(), matches.ToArray());
+    if(string.IsNullOrWhiteSpace(configuredAql) && emails.Count==0)
+        throw new InvalidOperationException("Configure Jira AQL or resolve an AD email for this user");
+    return (rows.Values.ToList(),matches.ToArray());
 }
 
 app.MapGet("/api/assets/diagnostics", async (HttpContext ctx) => {

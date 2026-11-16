@@ -27,3 +27,35 @@ Check(JiraAssetWorkflow.IsVerified(JsonNode.Parse("""{"objectAttributeValues":[]
 var comment = JiraAssetWorkflow.AuditComment(7, "EQ-7", "Model", "<script>", "new", "reason", "DOMAIN\\user", "DOMAIN\\admin", "attribute");
 Check(!comment.Contains("<script>") && comment.Contains("&lt;script&gt;") && comment.Contains("Assets request #7"), "Comment must escape HTML and carry audit ID");
 Console.WriteLine("PASS: Jira pagination, owner snapshots, readback verification and comment escaping");
+
+var userScope=JiraAssetOwnership.Aliases("INVESTA\\k.lechmyc",["user@example.com"]);
+var legacyDevice=JsonNode.Parse("""
+{"id":"3","attributes":[{"objectTypeAttributeId":"202",
+ "objectAttributeValues":[{"displayValue":"INVESTA\\k.lechmyc"}]}]}
+""")!;
+Check(JiraAssetOwnership.Matches(legacyDevice,"202",userScope),"Legacy Windows login owner matching");
+var nestedRef=JsonNode.Parse("""
+{"id":"4","attributes":[{"objectTypeAttributeId":"202",
+ "objectAttributeValues":[{"referencedObject":{"label":"k.lechmyc","objectKey":"EMP-4"}}]}]}
+""")!;
+Check(JiraAssetOwnership.Matches(nestedRef,"202",userScope),"Referenced employee label matches SAM");
+var foreignOwner=JsonNode.Parse("""
+{"id":"5","attributes":[{"objectTypeAttributeId":"202",
+ "objectAttributeValues":[{"displayValue":"INVESTA\\other"}]},
+ {"objectTypeAttributeId":"222","objectAttributeValues":[{"displayValue":"INVESTA\\k.lechmyc"}]}]}
+""")!;
+Check(!JiraAssetOwnership.Matches(foreignOwner,"202",userScope),
+ "Identity in unrelated attribute must not grant asset visibility");
+var partialOwner=JsonNode.Parse("""
+{"id":"6","attributes":[{"objectTypeAttributeId":"202",
+ "objectAttributeValues":[{"displayValue":"INVESTA\\k.lechmyc2"}]}]}
+""")!;
+Check(!JiraAssetOwnership.Matches(partialOwner,"202",userScope),
+ "Substring alias must never grant asset visibility");
+var commaOwners=JsonNode.Parse("""
+{"id":"7","attributes":[{"objectTypeAttributeId":"202",
+ "objectAttributeValues":[{"displayValue":"other, k.lechmyc"}]}]}
+""")!;
+Check(JiraAssetOwnership.Matches(commaOwners,"202",userScope),
+ "Legacy multiple owners must match one complete identity");
+Console.WriteLine("PASS: legacy Jira owner fallback, referenced owners and strict access scope");
