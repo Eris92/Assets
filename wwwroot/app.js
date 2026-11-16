@@ -1,5 +1,5 @@
 let me, assets = [], selected;
-const appBase = new URL('.', document.querySelector('script[src$="app.js"]').src);
+const appBase = new URL('.', document.querySelector('script[src^="app.js"]').src);
 const $ = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path, options = {}) {
@@ -50,6 +50,26 @@ async function loadAssets() {
   try {
     assets = await api('/api/assets');
     renderPersonalEquipment();
+    if (assets.length === 0) {
+      $('assets').insertAdjacentHTML('afterbegin',
+        '<div class="handoverNotice" style="margin-bottom:14px">' +
+        '<strong>Brak przypisanych urządzeń w Jira.</strong> ' +
+        'Jeżeli posiadasz sprzęt, sprawdź powiązanie konta AD z polem właściciela w Jira. ' +
+        '<button class="secondary" type="button" id="assetOwnerDiagnostics">Sprawdź przypisanie AD/Jira</button>' +
+        '<div id="assetDiagnosticsResult" class="meta" role="status"></div></div>');
+      $('assetOwnerDiagnostics').addEventListener('click', async () => {
+        const output = $('assetDiagnosticsResult');
+        output.textContent = 'Sprawdzanie adresów przypisanych do konta...';
+        try {
+          const data = await api('/api/assets/diagnostics');
+          const sources = (data.sources || []).map(s =>
+            s.source + ': ' + s.email + ' (' + s.objects + ' assetów)').join(' | ');
+          output.textContent = sources || 'Brak adresu e-mail przypisanego do konta.';
+        } catch (error) {
+          output.textContent = error.message;
+        }
+      });
+    }
   } catch(e) { $('assets').innerHTML = `<p class="empty">Nie udało się pobrać zasobów. ${escapeHtml(e.message)}</p>`; }
 }
 function statusName(s) { return ({Pending:'Oczekuje',Applying:'W trakcie',Approved:'Zatwierdzone',Rejected:'Odrzucone',AppliedAuditPending:'Zmieniono w Jira - komentarz do weryfikacji',NeedsReview:'Wymagana weryfikacja Jira',NeedsRegistration:'Do rejestracji w Jira',NeedsAccessReview:'Do przeglądu dostępu'})[s] || s; }

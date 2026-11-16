@@ -68,7 +68,12 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions {
+    OnPrepareResponse = context => {
+        // After an IIS release swap, old JS/CSS must not be reused silently.
+        context.Context.Response.Headers.CacheControl = "no-cache, must-revalidate";
+    }
+});
 
 string ConnectionString() => new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadWriteCreate }.ToString();
 using (var db = new SqliteConnection(ConnectionString())) {
@@ -311,9 +316,43 @@ string OwnerEmail(ClaimsPrincipal user) {
         throw new InvalidOperationException("Cannot derive a safe owner email from the Windows identity and Jira UserEmailDomain");
     return $"{login}@{domain}";
 }
-string OwnerAql(ClaimsPrincipal user) {
-    return $"Osoba_odpowiedzialna.\"Email Address\" = \"{OwnerEmail(user)}\"";
+string OwnerAqlForEmail(string email) {
+    if (!System.Text.RegularExpressions.Regex.IsMatch(email,
+            @"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"))
+        throw new InvalidOperationException("The resolved AD email cannot be used safely in Jira AQL");
+    return $"Osoba_odpowiedzialna.\"Email Address\" = \"{email}\"";
 }
+
+List<(string Email, string Source)> OwnerEmailCandidates(ClaimsPrincipal user) {
+    var candidates = new List<(string Email, string Source)>();
+    void Add(string? mail, string source) {
+        if (string.IsNullOrWhiteSpace(mail)) return;
+        var normalized = mail.Trim();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(normalized,
+                @"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"))
+            return;
+        if (!candidates.Any(x => x.Email.Equals(normalized, StringComparison.OrdinalIgnoreCase)))
+            candidates.Add((normalized, source));
+    }
+    try {
+        var ad = HandoverDirectory.Resolve(user.Identity?.Name ??
+            throw new InvalidOperationException("Windows identity unavailable"));
+        Add(ad.Email, "AD.mail");
+    } catch (Exception ex) when (ex is System.DirectoryServices.DirectoryServicesCOMException
+                              or InvalidOperationException or ArgumentException
+                              or System.Runtime.InteropServices.COMException) {
+        app.Logger.LogWarning("User AD mail lookup failed: {ErrorType}", ex.GetType().Name);
+    }
+    try {
+        Add(OwnerEmail(user), "WindowsSAM+domain");
+    } catch (InvalidOperationException) {
+        if (candidates.Count == 0) throw;
+    }
+    if (candidates.Count == 0)
+        throw new InvalidOperationException("Neither AD mail nor Windows fallback email could be resolved");
+    return candidates;
+}
+
 async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
     var aql = aqlOverride ?? Setting("Aql", "Jira:Aql");
     if (string.IsNullOrWhiteSpace(aql)) throw new InvalidOperationException("Jira AQL is not configured");
@@ -346,6 +385,39 @@ async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
     }
     throw new InvalidOperationException("Asset query limit reached; narrow the configured AQL");
 }
+
+// Every candidate must originate from the authenticated Windows account.
+// Never perform a tenant-wide fallback that could leak other employees' assets.
+async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Matches)> QueryMyAssets(ClaimsPrincipal user) {
+    var rows = new Dictionary<string, JsonNode>(StringComparer.Ordinal);
+    var matches = new List<(string Email, string Source, int Count)>();
+    foreach (var candidate in OwnerEmailCandidates(user)) {
+        var owned = await QueryAssets(OwnerAqlForEmail(candidate.Email));
+        matches.Add((candidate.Email, candidate.Source, owned.Count));
+        foreach (var obj in owned) {
+            var id = obj["id"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(id)) rows.TryAdd(id, obj);
+        }
+    }
+    return (rows.Values.ToList(), matches.ToArray());
+}
+
+app.MapGet("/api/assets/diagnostics", async (HttpContext ctx) => {
+    if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
+    if (!access.Check(ctx.User).Allowed) return Results.Forbid();
+    try {
+        var (items, candidates) = await QueryMyAssets(ctx.User);
+        return Results.Ok(new {
+            login = ctx.User.Identity.Name,
+            sources = candidates.Select(x => new {source = x.Source, email = x.Email, objects = x.Count}),
+            totalUniqueObjects = items.Count,
+            note = "Only Jira objects owned by the authenticated Windows identity are queried."
+        });
+    } catch (Exception ex) {
+        app.Logger.LogError(ex, "My Assets read-only diagnostics failed");
+        return Results.Problem("Nie mozna sprawdzic mapowania AD mail i Jira. Sprawdz logi serwera.", statusCode: 502);
+    }
+});
 
 app.MapGet("/api/me", (HttpContext ctx, IAntiforgery anti) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
@@ -788,7 +860,7 @@ app.MapGet("/api/reviews/mine", (HttpContext ctx) => {
 });
 async Task<(string Hash,string Json,object Items)> ReadReviewSnapshot(ClaimsPrincipal actor,CancellationToken token,string kind) {
     if(kind=="assets") {
-        var entries=await QueryAssets(OwnerAql(actor));
+        var (entries, _) = await QueryMyAssets(actor);
         var normalized=entries.Select(e=>new {
             id=e["id"]?.ToString(),key=e["objectKey"]?.ToString(),
             attributes=e["attributes"]?.ToJsonString()
@@ -1093,7 +1165,7 @@ app.MapGet("/api/assets", async (HttpContext ctx) => {
         if (string.IsNullOrWhiteSpace(ownerId)) return Results.Problem("Configure Jira OwnerAttributeId", statusCode: 503);
         // Jira reference owner values are not Windows logins. Use Jira's
         // validated Email Address reference query, like the working build.
-        var entries = await QueryAssets(OwnerAql(ctx.User));
+        var (entries, _) = await QueryMyAssets(ctx.User);
         return Results.Ok(entries.Select(o => ProjectObject(o!)));
     } catch (Exception ex) { app.Logger.LogError(ex, "Asset query failed"); return Results.Problem("Nie udalo sie pobrac danych Jira.", statusCode: 502); }
 });
@@ -1682,7 +1754,7 @@ app.MapPost("/api/reports", async (HttpContext ctx, IAntiforgery anti, ReportInp
         if (!own) {
             // Server-side Jira AQL is authoritative when the owner is an Assets
             // object reference rather than a plain Windows login string.
-            var ownedObjects = await QueryAssets(OwnerAql(ctx.User));
+            var (ownedObjects, _) = await QueryMyAssets(ctx.User);
             own = ownedObjects.Any(o => o["id"]?.ToString() == input.ObjectId);
         }
         var employees = own ? Array.Empty<TeamMember>() : ReportsTo(ctx.User.Identity.Name!).Where(p => OwnerMatches(owner, p.Login)).ToArray();

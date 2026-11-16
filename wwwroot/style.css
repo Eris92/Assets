@@ -123,3 +123,9 @@ nav button.active .navIcon,nav button:hover .navIcon{opacity:1;color:#70dcca}
 #entEditDialog label,#entReportDialog label,#entManualDialog label{display:grid;gap:6px}
 #entEditDialog .entCheck,#entManualDialog .entCheck{display:flex;align-items:center;gap:8px}
 #entEditDialog textarea,#entReportDialog textarea,#entManualDialog textarea{width:100%}
+
+/* Prevent unbounded sidebar SVG in cached or partially applied stylesheets. */
+aside nav svg.navIcon{display:block!important;width:18px!important;height:18px!important;min-width:18px;max-width:18px;min-height:18px;max-height:18px;flex:0 0 18px!important;object-fit:contain;vertical-align:middle}
+aside nav button[data-view]{display:flex;align-items:center;justify-content:flex-start;flex-wrap:nowrap;gap:9px;white-space:normal;min-width:0}
+aside nav button[data-view] svg.navIcon{flex-shrink:0}
+aside nav .equipmentSubnav button{min-height:39px}
