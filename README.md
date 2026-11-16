@@ -293,3 +293,22 @@ Skrypt `Jira Asset Protocol.ps1` udostepnia AQL `objectType in objectTypeAndChil
 ## Rollback
 
 Przywroc poprzedni katalog publikacji i kopie `portal.db`. Zmiany juz zaakceptowane w Jira wymagaja osobnej korekty wedlug historii zgloszen; rollback aplikacji nie cofa zmian w Jira.
+
+### IIS update without credential prompts
+
+`scripts/Update-Production.ps1` keeps the existing site-wide Windows
+Authentication configuration and does **not** request credentials or run HTTP
+health probes against protected pages. Run it from elevated PowerShell:
+
+```powershell
+& 'C:\Sites\Assets\scripts\Update-Production.ps1'
+```
+
+This deliberately avoids interpreting HTTP 401 (an IIS authentication challenge)
+as an application startup failure. It verifies the release package, IIS physical
+path and app-pool state, and retains the prior release for rollback. **Limit:**
+these IIS checks cannot guarantee the ASP.NET Core host successfully initialized.
+The GitHub Actions publish-startup smoke test verifies a clean runtime/SQLite
+environment before packaging; it cannot substitute for a production request
+with an authenticated Windows browser session. After deploying, check the portal
+from that browser and inspect Windows Application event logs if it returns 500.30.

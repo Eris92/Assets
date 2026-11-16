@@ -1,11 +1,7 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$SiteName = 'Assets-KL',
-    [string]$DeployRoot = 'C:\Sites\AssetsDeploy',
-    [string]$HealthUrl,
-    [PSCredential]$HealthCredential,
-    [switch]$CheckHealthOnly,
-    [switch]$SkipPreDeployHealthCheck
+    [string]$DeployRoot = 'C:\Sites\AssetsDeploy'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -86,111 +82,9 @@ function Start-AppPoolSafely {
 }
 
 
-# An IIS app-pool state is not a readiness signal. Only this site's actual
-# ASP.NET Core response is accepted, never a naked 401/403 challenge.
-function Get-AssetsHealthUrl {
-    param([string]$Name, [string]$Supplied)
-    $bindings = @(Get-WebBinding -Name $Name -ErrorAction Stop |
-        Where-Object { $_.protocol -eq 'https' })
-    if ($bindings.Count -eq 0) {
-        throw "IIS site $Name has no HTTPS binding. Refusing insecure production health checks."
-    }
-    $targets = @(
-        foreach ($binding in $bindings) {
-            $parts = ([string]$binding.bindingInformation).Split(':', 3)
-            if ($parts.Count -ne 3) { continue }
-            $number = 0
-            if (-not [int]::TryParse($parts[1], [ref]$number)) { continue }
-            if ($number -lt 1 -or $number -gt 65535) { continue }
-            [pscustomobject]@{ HostName = $parts[2].Trim(); Port = $number }
-        }
-    )
-    if ($targets.Count -eq 0) {
-        throw "No usable HTTPS binding was found for IIS site $Name."
-    }
-    if ([string]::IsNullOrWhiteSpace($Supplied)) {
-        $target = $targets | Where-Object { $_.HostName -ne '' } | Select-Object -First 1
-        if ($null -eq $target) { $target = $targets[0] }
-        $hostToProbe = if ($target.HostName -eq '') { 'localhost' } else { $target.HostName }
-        $Supplied = 'https://{0}:{1}/' -f $hostToProbe, $target.Port
-    }
-    $parsed = $null
-    if (-not [uri]::TryCreate($Supplied, [UriKind]::Absolute, [ref]$parsed) -or
-        $parsed.Scheme -ne 'https' -or
-        $parsed.UserInfo -ne '' -or
-        $parsed.Query -ne '' -or
-        $parsed.Fragment -ne '' -or
-        $parsed.AbsolutePath -ne '/') {
-        throw "HealthUrl must be the HTTPS root of this IIS site, e.g. https://assets.example.com:8081/ . Got: $Supplied"
-    }
-    $matching = @($targets | Where-Object {
-        $_.Port -eq $parsed.Port -and
-        ($_.HostName -eq '' -or $_.HostName.Equals($parsed.DnsSafeHost, [StringComparison]::OrdinalIgnoreCase))
-    })
-    if ($matching.Count -eq 0) {
-        $allowed = ($targets | ForEach-Object { 'https://{0}:{1}/' -f $_.HostName, $_.Port }) -join ', '
-        throw "HealthUrl does not match any HTTPS binding of IIS site $Name. Site bindings: $allowed"
-    }
-    return $parsed.AbsoluteUri
-}
-function Assert-AssetsHttpReady {
-    param(
-        [string]$Url,
-        [PSCredential]$Credential,
-        [int]$Attempts = 1
-    )
-    $lastFailure = 'No response from this IIS application'
-    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-        try {
-            $args = @{
-                Uri = $Url
-                UseBasicParsing = $true
-                TimeoutSec = 7
-                MaximumRedirection = 0
-                ErrorAction = 'Stop'
-                Headers = @{ 'Cache-Control' = 'no-cache'; 'Pragma' = 'no-cache' }
-            }
-            if ($null -ne $Credential) {
-                $args.Credential = $Credential
-            } else {
-                $args.UseDefaultCredentials = $true
-            }
-            $response = Invoke-WebRequest @args
-            if ($response.StatusCode -ne 200) {
-                throw "HTTP $($response.StatusCode), expected HTTP 200"
-            }
-            if ($response.Content -notmatch '<title>[^<]*Assets Portal</title>') {
-                throw 'HTTP 200 was returned by a page that is NOT the expected Assets Portal.'
-            }
-            Write-Host "Assets Portal HTTPS readiness passed: $Url"
-            return
-        } catch {
-            $lastFailure = $_.Exception.Message
-            $httpError = $_.Exception.Response
-            if ($null -ne $httpError -and [int]$httpError.StatusCode -eq 401) {
-                $lastFailure = 'HTTP 401 Windows Authentication failed for the updater account. ' +
-                    'Use a correct Assets IIS URL and run with an authorized Windows identity, ' +
-                    'or supply -HealthCredential (Get-Credential).'
-            }
-        }
-        if ($attempt -lt $Attempts) { Start-Sleep -Seconds 1 }
-    }
-    throw "Assets Portal HTTPS readiness failed at $Url : $lastFailure"
-}
-$assetsHealthUrl = Get-AssetsHealthUrl -Name $SiteName -Supplied $HealthUrl
-if ($CheckHealthOnly) {
-    Assert-AssetsHttpReady -Url $assetsHealthUrl -Credential $HealthCredential
-    Write-Host 'Health test only: no Git pull, download, IIS changes or database modifications.'
-    return
-}
-if (-not $SkipPreDeployHealthCheck) {
-    # Fail before downloads, database migrations and IIS changes if the provided
-    # hostname resolves to another service or the operator cannot authenticate.
-    Assert-AssetsHttpReady -Url $assetsHealthUrl -Credential $HealthCredential
-} else {
-    Write-Warning 'Pre-deploy probe skipped for break-glass recovery. Post-deploy probe remains mandatory.'
-}
-
+# Windows Authentication remains enabled for the entire portal.
+# Do not probe the protected URL with explicit credentials during deployment.
+# Startup is tested independently against a published binary in GitHub CI.
 Write-Host 'Pulling source...'
 # Windows PowerShell 5.1 converts native Git stderr (including normal fetch status)
 # into NativeCommandError when ErrorActionPreference is Stop. Run Git as a
@@ -433,8 +327,9 @@ try {
     if ((Get-WebAppPoolState -Name $poolName).Value -ne 'Started') {
         throw 'Application pool did not start.'
     }
-    # Same authenticated, site-identity-validated check as the preflight.
-    Assert-AssetsHttpReady -Url $assetsHealthUrl -Credential $HealthCredential -Attempts 8
+    # No HTTP probe: this IIS site requires Windows Authentication.
+    # Keep the normal IIS configuration, avoid credential prompts and false 401 rollbacks.
+    # Note: app-pool Started does not guarantee that ASP.NET Core fully initialized.
     Write-Host "Deployed commit: $commit"
     Write-Host "IIS $SiteName PhysicalPath: $newPath"
     Write-Host "Backup: $backupDir"
