@@ -695,6 +695,31 @@ string SafeOwnerAql(HandoverPerson person) {
         throw new InvalidOperationException("The AD email cannot be used in Jira AQL safely");
     return $"Osoba_odpowiedzialna.\"Email Address\" = \"{mail}\"";
 }
+async Task<List<JsonNode>> QueryAssetsForPerson(HandoverPerson person,string windowsDomain) {
+    var full = string.IsNullOrWhiteSpace(windowsDomain) ? person.Login :
+        windowsDomain + "\\" + person.Login;
+    var aliases = JiraAssetOwnership.Aliases(full,[person.Email]);
+    var ownerId = Setting("OwnerAttributeId","Jira:OwnerAttributeId") ??
+        throw new InvalidOperationException("OwnerAttributeId must be configured");
+    var configured = Setting("Aql","Jira:Aql");
+    var found = new Dictionary<string,JsonNode>(StringComparer.Ordinal);
+    if(!string.IsNullOrWhiteSpace(configured)) {
+        foreach(var obj in await QueryAssets(configured)) {
+            if(!JiraAssetOwnership.Matches(obj,ownerId,aliases))continue;
+            var id=obj["id"]?.ToString();
+            if(!string.IsNullOrWhiteSpace(id))found.TryAdd(id,obj);
+        }
+    }
+    try {
+        foreach(var obj in await QueryAssets(SafeOwnerAql(person))) {
+            var id=obj["id"]?.ToString();
+            if(!string.IsNullOrWhiteSpace(id))found.TryAdd(id,obj);
+        }
+    } catch(Exception ex) when(!string.IsNullOrWhiteSpace(configured)) {
+        app.Logger.LogWarning(ex,"Optional person email AQL failed; retaining owner-attribute results");
+    }
+    return found.Values.ToList();
+}
 bool IsEquipment(JsonNode obj) {
     var name = obj["objectType"]?["name"]?.ToString() ?? "";
     return !System.Text.RegularExpressions.Regex.IsMatch(name,
@@ -722,8 +747,9 @@ app.MapGet("/api/handover/assets", async (HttpContext ctx, string? q, string? ow
         HandoverPerson? person = null;
         if (!string.IsNullOrWhiteSpace(owner))
             person = await Task.Run(() => HandoverDirectory.Resolve(owner), ctx.RequestAborted);
-        var aql = person is null ? "objectId > 0" : SafeOwnerAql(person);
-        var objects = await QueryAssets(aql);
+        var objects = person is null
+            ? await QueryAssets("objectId > 0")
+            : await QueryAssetsForPerson(person, ctx.User.Identity!.Name!.Split('\\')[0]);
         var available = objects.Where(IsEquipment)
             .Where(o => query.Length == 0 ||
                 (o["objectKey"]?.ToString() ?? "").Contains(query, StringComparison.OrdinalIgnoreCase) ||
@@ -774,7 +800,7 @@ app.MapPost("/api/handover/protocols", async (HttpContext ctx, IAntiforgery anti
             return Results.Problem("Configure Jira OwnerAttributeId", statusCode: 503);
         HashSet<string>? owned = null;
         if (source is not null) {
-            owned = (await QueryAssets(SafeOwnerAql(source)))
+            owned = (await QueryAssetsForPerson(source,ctx.User.Identity!.Name!.Split('\\')[0]))
                 .Select(o => o["id"]?.ToString() ?? "").ToHashSet(StringComparer.Ordinal);
         }
         var items = new List<HandoverItem>();
@@ -1209,16 +1235,43 @@ app.MapGet("/api/team", async (HttpContext ctx) => {
         if (!long.TryParse(ownerId,out _)) return Results.Problem("Configure Jira OwnerAttributeId", statusCode:503);
         var delegatedRoots = delegations.ByDelegate(actor).Select(x=>x.ManagerLogin).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var directTeam = ReportsTo(actor).Select(p=>p.Login).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var configured = Setting("Aql","Jira:Aql");
+        // One configured-scope scan for the whole team; never one global scan per employee.
+        var scoped = string.IsNullOrWhiteSpace(configured)
+            ? new List<JsonNode>()
+            : await QueryAssets(configured);
         var equipment = new System.Collections.Concurrent.ConcurrentBag<object>();
         var failures = new System.Collections.Concurrent.ConcurrentBag<string>();
         using var gate = new SemaphoreSlim(3);
         var tasks = people.Select(async person => {
             await gate.WaitAsync(ctx.RequestAborted);
             try {
-                // AQL reference lookup by actual AD mail, never raw displayValue comparison.
-                var ad = await Task.Run(()=>HandoverDirectory.Resolve(person.Login),ctx.RequestAborted);
-                var objects = await QueryAssets(SafeOwnerAql(ad));
-                foreach (var obj in objects.Where(IsEquipment)) {
+                // Apply the same owner-attribute mapping as the legacy portal.
+                // AD mail/reference AQL is additional, not the only source.
+                HandoverPerson? ad = null;
+                try {
+                    ad = await Task.Run(()=>HandoverDirectory.Resolve(person.Login),ctx.RequestAborted);
+                } catch(Exception ex) when(scoped.Count>0) {
+                    app.Logger.LogWarning(ex,"AD mail resolution unavailable for scoped team entry");
+                }
+                var aliases = JiraAssetOwnership.Aliases(person.Login,
+                    ad is null ? Array.Empty<string>() : new[]{ad.Email});
+                var objects = new Dictionary<string,JsonNode>(StringComparer.Ordinal);
+                foreach(var obj in scoped.Where(o=>JiraAssetOwnership.Matches(o,ownerId!,aliases))) {
+                    var id=obj["id"]?.ToString();
+                    if(!string.IsNullOrWhiteSpace(id))objects.TryAdd(id,obj);
+                }
+                if(ad is not null) {
+                    try {
+                        foreach(var obj in await QueryAssets(SafeOwnerAql(ad))) {
+                            var id=obj["id"]?.ToString();
+                            if(!string.IsNullOrWhiteSpace(id))objects.TryAdd(id,obj);
+                        }
+                    } catch(Exception ex) when(!string.IsNullOrWhiteSpace(configured)) {
+                        app.Logger.LogWarning(ex,"Optional Jira email AQL failed for scoped team member");
+                    }
+                }
+                foreach (var obj in objects.Values.Where(IsEquipment)) {
                     equipment.Add(new {
                         id=obj["id"]?.ToString(), key=obj["objectKey"]?.ToString(),
                         name=obj["name"]?.ToString() ?? obj["label"]?.ToString(),
