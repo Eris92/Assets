@@ -324,10 +324,91 @@ try {
     if ((Get-WebAppPoolState -Name $poolName).Value -ne 'Started') {
         throw 'Application pool did not start.'
     }
-    if ($HealthUrl) {
-        $health = Invoke-RestMethod -Uri $HealthUrl -UseDefaultCredentials -TimeoutSec 30
-        if ($null -eq $health -or $health.allowed -ne $true) { throw 'Authenticated health check failed.' }
+    # Verify real HTTP after the app pool starts. A Started pool can still return 500.30.
+    $healthEndpoint = $HealthUrl
+    if ([string]::IsNullOrWhiteSpace($healthEndpoint)) {
+        $bindings = @(Get-WebBinding -Name $SiteName -ErrorAction Stop |
+            Where-Object { $_.protocol -in @('https', 'http') } |
+            Sort-Object @{ Expression = { if ($_.protocol -eq 'https') { 0 } else { 1 } } })
+        foreach ($binding in $bindings) {
+            $parts = [string]$binding.bindingInformation -split ':', 3
+            if ($parts.Count -ne 3) { continue }
+            $port = 0
+            if (-not [int]::TryParse($parts[1], [ref]$port) -or $port -lt 1 -or $port -gt 65535) { continue }
+            $hostname = if ([string]::IsNullOrWhiteSpace($parts[2])) { 'localhost' } else { $parts[2].Trim() }
+            if ($hostname -notmatch '^[a-zA-Z0-9][a-zA-Z0-9.-]*
+    Write-Host "Deployed commit: $commit"
+    Write-Host "IIS $SiteName PhysicalPath: $newPath"
+    Write-Host "Backup: $backupDir"
+    Write-Host 'Check /api/me and /api/assets using your Windows account.'
+    if (-not $poolWasStarted) { Write-Host "App pool $poolName recovered from its previously stopped state." }
+} catch {
+    $failure = $_
+    if ($changed) {
+        try {
+            Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter $pathFilter -Name physicalPath -Value $oldPath
+            if ($null -ne $oldWindows) {
+                Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Location $SiteName -Filter $winFilter -Name enabled -Value $oldWindows
+            }
+            if ($null -ne $oldAnonymous) {
+                Set-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Location $SiteName -Filter $anonFilter -Name enabled -Value $oldAnonymous
+            }
+            Write-Warning "Restored previous IIS path: $oldPath"
+        } catch { Write-Warning "IIS rollback failed: $($_.Exception.Message)" }
     }
+    if ($changed) {
+        try {
+            Stop-AppPoolSafely -Name $poolName
+            if ($poolWasStarted) { Start-AppPoolSafely -Name $poolName }
+            Write-Warning 'Rollback pool recycled to reload previous IIS release.'
+        } catch {
+            Write-Warning "Failed to restart pool during rollback: $($_.Exception.Message)"
+        }
+    } elseif ($stopped -and $poolWasStarted) {
+        try {
+            Start-AppPoolSafely -Name $poolName
+        } catch {
+            Write-Warning "App pool start failed during rollback: $($_.Exception.Message)"
+        }
+    }
+    throw $failure
+} finally {
+    if (Test-Path -LiteralPath $temp) {
+        Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+) { continue }
+            $healthEndpoint = '{0}://{1}:{2}/' -f $binding.protocol, $hostname, $port
+            break
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($healthEndpoint)) {
+        throw "No usable IIS HTTP(S) binding was found for $SiteName; supply -HealthUrl explicitly."
+    }
+    $healthy = $false
+    $lastHealthError = 'No successful HTTP response'
+    for ($attempt = 1; $attempt -le 8; $attempt++) {
+        try {
+            $response = Invoke-WebRequest -Uri $healthEndpoint -UseDefaultCredentials -UseBasicParsing -TimeoutSec 7 -ErrorAction Stop
+            if ($response.StatusCode -eq 200) {
+                $parsedUri = [uri]$healthEndpoint
+                if ($parsedUri.AbsolutePath -eq '/api/me') {
+                    $payload = $response.Content | ConvertFrom-Json -ErrorAction Stop
+                    if ($payload.allowed -ne $true) { throw 'Authenticated /api/me check did not return allowed=true' }
+                }
+                $healthy = $true
+                break
+            }
+            $lastHealthError = 'HTTP ' + [string]$response.StatusCode
+        } catch {
+            $lastHealthError = $_.Exception.Message
+        }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $healthy) {
+        throw "Application HTTP health check FAILED at $healthEndpoint. Last error: $lastHealthError"
+    }
+    Write-Host "Application health check passed: $healthEndpoint"
     Write-Host "Deployed commit: $commit"
     Write-Host "IIS $SiteName PhysicalPath: $newPath"
     Write-Host "Backup: $backupDir"
