@@ -59,3 +59,11 @@ var commaOwners=JsonNode.Parse("""
 Check(JiraAssetOwnership.Matches(commaOwners,"202",userScope),
  "Legacy multiple owners must match one complete identity");
 Console.WriteLine("PASS: legacy Jira owner fallback, referenced owners and strict access scope");
+
+var unrelatedReference=JsonNode.Parse("""
+{"id":"8","attributes":[{"objectTypeAttributeId":"202",
+ "objectAttributeValues":[{"referencedObject":{"label":"another.person",
+  "attributes":[{"objectAttributeValues":[{"displayValue":"INVESTA\\k.lechmyc"}]}]}}]}]}
+""")!;
+Check(!JiraAssetOwnership.Matches(unrelatedReference,"202",userScope),
+ "Referenced object's unrelated attributes must not leak another owner's asset");

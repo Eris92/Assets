@@ -52,13 +52,10 @@ internal static class JiraAssetOwnership {
         // attribute names, and never use substrings or suffix matches.
         foreach(var key in new[]{"value","displayValue","searchValue","user",
             "referencedObject","label","name","objectKey","key","emailAddress",
-            "email","username","accountId","attributes"}) {
+            "email","username","accountId"}) {
             if(!obj.TryGetPropertyValue(key,out var item))continue;
             foreach(var text in Strings(item,depth+1))yield return text;
         }
-        // A Jira referenced-object attribute may contain its own values.
-        if(obj.TryGetPropertyValue("objectAttributeValues",out var attrValues)) {
-            foreach(var text in Strings(attrValues,depth+1))yield return text;
-        }
+
     }
 }
