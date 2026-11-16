@@ -21,8 +21,8 @@ function renderTeam(){
   $('teamSummary').innerHTML=[['Pracownicy',people.length],
     ['Bezposredni',people.filter(p=>p.manager==='me').length],
     ['Posredni',people.filter(p=>p.manager!=='me').length],
-    ['Sprzet',teamInventoryComplete?equipment.length:'?'],
-    ['Bez przypisanego sprzetu',teamInventoryComplete?missing.length:'?']].map(([label,value])=>
+    ['Sprzet',equipment.length],
+    ['Bez przypisanego sprzetu',missing.length]].map(([label,value])=>
     '<div><strong>'+value+'</strong><span>'+label+'</span></div>').join('');
   $('teamTree').innerHTML='<h3>Struktura zespolu</h3>'+
     '<button data-person="" class="'+(!selectedPerson?'selected':'')+'">Caly zespol</button>'+
