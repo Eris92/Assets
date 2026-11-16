@@ -135,3 +135,43 @@ aside nav .equipmentSubnav button{min-height:39px}
 .entAdminPicker label{flex:1;min-width:240px;display:grid;gap:5px}
 .entAdminPicker select{width:100%}
 .entAdminPicker button{white-space:nowrap}
+
+
+/* Responsive application shell: independently scrollable navigation, fixed footer. */
+html,body{min-width:0;width:100%;max-width:100%;}
+.shell{grid-template-columns:clamp(220px,16vw,270px) minmax(0,1fr);min-height:100dvh;align-items:start;}
+main{min-width:0;max-width:none;width:100%;padding:clamp(16px,2vw,30px);overflow-x:clip;}
+main>section,main>.settingsCard,main>.toolbar{min-width:0;max-width:100%;}
+.settingsCard{max-width:100%;}
+.teamLayout{grid-template-columns:minmax(190px,240px) minmax(0,1fr);gap:clamp(12px,1.5vw,24px);}
+.teamLayout>div,.teamLayout .equipmentFilters,.equipmentList{min-width:0;max-width:100%;}
+.teamSummary{grid-template-columns:repeat(5,minmax(0,1fr));gap:clamp(8px,1vw,14px);}
+.teamSummary>div{min-width:0;}
+.equipmentFilters{width:100%;}
+.equipmentTableWrap{max-width:100%;}
+.toolbar{min-width:0;flex-wrap:wrap;gap:12px;}
+@media(min-width:761px){
+ .shell{grid-template-columns:clamp(220px,16vw,270px) minmax(0,1fr);}
+ aside{box-sizing:border-box;width:100%;min-width:0;position:sticky;top:0;height:100dvh!important;max-height:100dvh;overflow:hidden!important;display:flex;flex-direction:column;gap:0;padding:clamp(12px,1.5vw,22px) 12px;}
+ aside .brand{flex:0 0 auto;margin-bottom:16px;}
+ aside nav{display:grid;align-content:start;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#537082 transparent;padding-right:3px;}
+ aside .sidebarBottom{flex:0 0 auto;margin:0!important;padding:12px 9px 0;border-top:1px solid #315066;background:#10283f;}
+ aside nav button{min-width:0;}
+}
+@media(max-width:1180px){
+ .teamLayout{grid-template-columns:1fr;}
+ .teamTree{max-height:260px;overflow-y:auto;}
+ .teamSummary{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));}
+}
+@media(max-width:760px){
+ .shell{display:block;}
+ aside{position:relative;height:auto!important;overflow:visible!important;padding:12px;}
+ aside .brand{margin-bottom:10px;}
+ aside nav{display:flex;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;gap:8px;max-width:100%;}
+ aside nav>.equipmentGroup,aside nav>button{flex:0 0 auto;}
+ aside .sidebarBottom{display:block;margin-top:10px!important;padding:9px 5px 0;border-top:1px solid #315066;}
+ main{padding:16px 12px;}
+ .teamSummary{grid-template-columns:repeat(2,minmax(0,1fr));}
+ .teamLayout{grid-template-columns:1fr;}
+ .settingsGrid{grid-template-columns:minmax(0,1fr);}
+}
