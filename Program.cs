@@ -1253,9 +1253,23 @@ app.MapGet("/api/team", async (HttpContext ctx) => {
         var directTeam = ReportsTo(actor).Select(p=>p.Login).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var configured = Setting("Aql","Jira:Aql");
         // One configured-scope scan for the whole team; never one global scan per employee.
-        var scoped = string.IsNullOrWhiteSpace(configured)
-            ? new List<JsonNode>()
-            : await QueryAssets(configured);
+        List<JsonNode> scoped;
+        try {
+            scoped = string.IsNullOrWhiteSpace(configured)
+                ? new List<JsonNode>()
+                : await QueryAssets(configured);
+        } catch(Exception ex) {
+            app.Logger.LogWarning(ex, "Team Jira scoped inventory query failed");
+            return Results.Ok(new {
+                people=people.Select(p=>new {
+                    id=p.Login,name=p.Name,role=p.Role,
+                    manager=LoginKey(p.Manager)==LoginKey(actor) || delegatedRoots.Contains(p.Manager) ? "me" : p.Manager,
+                    delegated=!directTeam.Contains(p.Login)
+                }),
+                equipment=Array.Empty<object>(), inventoryComplete=false,
+                inventoryError="Nie udalo sie pobrac zasobow Jira. Struktura AD jest dostepna."
+            });
+        }
         var equipment = new System.Collections.Concurrent.ConcurrentBag<object>();
         var failures = new System.Collections.Concurrent.ConcurrentBag<string>();
         using var gate = new SemaphoreSlim(3);
