@@ -129,3 +129,9 @@ aside nav svg.navIcon{display:block!important;width:18px!important;height:18px!i
 aside nav button[data-view]{display:flex;align-items:center;justify-content:flex-start;flex-wrap:nowrap;gap:9px;white-space:normal;min-width:0}
 aside nav button[data-view] svg.navIcon{flex-shrink:0}
 aside nav .equipmentSubnav button{min-height:39px}
+
+/* Entitlement descriptions/visibility are managed only in Admin Settings. */
+.entAdminPicker{display:flex;align-items:end;flex-wrap:wrap;gap:12px;margin:14px 0}
+.entAdminPicker label{flex:1;min-width:240px;display:grid;gap:5px}
+.entAdminPicker select{width:100%}
+.entAdminPicker button{white-space:nowrap}

@@ -8,7 +8,7 @@ const entitlementCategories=[
 const entState={
   self:null,teamPeople:[],teamCurrent:'',teamAll:false,teamData:[],
   teamLoaded:0,category:'all',query:'',teamCategory:'all',teamQuery:'',
-  teamRequest:0,editing:null,report:null,adminRules:[],
+  teamRequest:0,editing:null,report:null,adminRules:[],adminCatalog:[],
   loading:false
 };
 const entHtml=s=>escapeHtml(s??'');
@@ -23,7 +23,7 @@ function entStatusInfo(data){
   ':</b> '+entHtml(status)+'</div>').join('')+
   '<p class="meta">'+entHtml(data.warning||'')+'</p></details>';
 }
-function entRowTable(rows,admin=false){
+function entRowTable(rows){
  if(!rows.length)return '<p class="empty">Brak uprawnień w wybranym filtrze. Sprawdź stan źródeł powyżej.</p>';
  return '<div class="equipmentTableWrap"><table class="equipmentTable"><thead><tr>'+
    '<th>Uprawnienie</th><th>Źródło / sposób nadania</th><th>Opis przeznaczenia</th>'+
@@ -38,7 +38,6 @@ function entRowTable(rows,admin=false){
     '</td><td><small>'+entHtml(item.userLogin)+'</small></td>'+
     '<td class="equipmentAction"><div class="entActions">'+
     '<button type="button" class="reportEquipment" data-ent-report="'+i+'">Zgłoś nadmiar</button>'+
-    (admin?'<button type="button" class="secondary" data-ent-edit="'+i+'">Opis / ukrycie</button>':'')+
     '</div></td></tr>'
    ).join('')+'</tbody></table></div>';
 }
@@ -68,7 +67,7 @@ function renderEntitlementSelf(){
  '<button type="button" class="secondary" id="entSelfRefresh">Odśwież</button></div>'+
  entStatusInfo(entState.self)+
  '<p class="equipmentCount">Widoczne: '+filtered.length+' z '+all.length+'</p>'+
- entRowTable(filtered,Boolean(me?.admin));
+ entRowTable(filtered);
  entState.renderedSelf=filtered;
 }
 async function loadMyPermissions(){
@@ -142,7 +141,7 @@ function renderEntitlementTeam(){
  '<button type="button" class="secondary" id="entTeamRefresh">Odśwież</button></div>'+
  entState.teamData.map(d=>entStatusInfo(d)).join('')+
  '<p class="equipmentCount">Wyniki: '+rows.length+' (dane '+entState.teamLoaded+' z '+
- people.length+' pracowników)</p>'+entRowTable(rows,Boolean(me?.admin))+
+ people.length+' pracowników)</p>'+entRowTable(rows)+
  (entState.teamAll&&entState.teamLoaded<people.length?
  '<div class="actions"><button type="button" class="secondary" id="entTeamNext">Pobierz kolejnych 3 pracowników</button></div>':'');
  entState.renderedTeam=rows;
@@ -153,31 +152,6 @@ function entPickRow(button){
  const index=Number(button.dataset.entReport??button.dataset.entEdit);
  if(!Number.isInteger(index)||index<0)return null;
  return (self?entState.renderedSelf:entState.renderedTeam)?.[index]||null;
-}
-function entEditDialog(row){
- if(!me?.admin)return;
- entState.editing=row;
- $('entEditSource').value=row.source;
- $('entEditKey').value=row.key;
- $('entEditTitle').textContent=row.name+' · '+entCategoryLabel(row.source);
- $('entEditNote').value=row.note||'';
- $('entEditHidden').checked=Boolean(row.hidden);
- $('entEditDialog').showModal();
-}
-async function entSaveMetadata(e){
- e.preventDefault();if(!me?.admin||!entState.editing)return;
- const button=$('entEditSave');button.disabled=true;
- try{
-  await api('/api/admin/entitlements/metadata',{method:'PUT',body:JSON.stringify({
-   source:entState.editing.source,key:entState.editing.key,
-   note:$('entEditNote').value,hidden:$('entEditHidden').checked
-  })});
-  $('entEditDialog').close();
-  message('Opis i widoczność uprawnienia zapisane.');
-  await Promise.all([loadMyPermissions(),me.manager?refreshTeamPermissions():Promise.resolve()]);
-  await loadEntitlementAdmin();
- }catch(ex){message(ex.message,true)}
- finally{button.disabled=false}
 }
 function entReportDialog(row){
  if(!row)return;
@@ -251,6 +225,21 @@ async function loadEntitlementAdmin(){
     api('/api/admin/entitlements/metadata'),api('/api/admin/entitlements/graph')
   ]);
   entState.adminRules=rules;
+  // Inventory selection belongs to administrator settings only.
+  // Data is read via the same authenticated API; no direct Graph credentials in browser.
+  try {
+    const inventory=entState.self||await api('/api/entitlements');
+    entState.adminCatalog=inventory.items||[];
+    const picker=$('entAdminCatalogPicker');
+    picker.innerHTML='<option value="">-- wybierz grupę / uprawnienie --</option>'+
+      entState.adminCatalog.map((row,i)=>'<option value="'+i+'">'+
+        entHtml(entCategoryLabel(row.source)+' / '+row.name+' / '+row.userLogin)+'</option>').join('');
+    $('entAdminCatalogStatus').textContent='Pozycje z konta administratora: '+
+      entState.adminCatalog.length+'. Inne grupy można wskazać ręcznie według identyfikatora źródła.';
+  } catch(e) {
+    $('entAdminCatalogStatus').textContent='Nie można pobrać listy: '+e.message+
+      '. Możesz nadal użyć reguły ręcznej.';
+  }
   $('entGraphTenant').value=graph.tenantId||'';
   $('entGraphClient').value=graph.clientId||'';
   $('entGraphThumb').value=graph.certificateThumbprint||'';
@@ -266,7 +255,7 @@ function renderEntRules(){
    entHtml(r.source)+'</b> · '+entHtml(r.key)+
    '<small>'+entHtml(r.note||'Bez opisu')+' · '+(r.hidden?'Ukryte':'Widoczne')+'</small></div>'+
    '<button type="button" class="secondary" data-ent-rule="'+i+'">Edytuj</button></div>').join(''):
-  '<p class="empty">Brak ustawień opisów / ukryć. Otwórz dowolną grupę jako administrator i użyj „Opis / ukrycie”.</p>';
+  '<p class="empty">Brak reguł. Wybierz pozycję z katalogu powyżej lub dodaj regułę ręcznie.</p>';
 }
 function entMetaManual(rule=null){
  entState.editing=rule?{source:rule.source,key:rule.key,name:rule.key,
@@ -341,22 +330,22 @@ document.addEventListener('click',async e=>{
  else if(target.dataset.entReport!==undefined){
   const row=entPickRow(target);if(row)entReportDialog(row)
  }
- else if(target.dataset.entEdit!==undefined){
-  const row=entPickRow(target);if(row)entEditDialog(row)
- }
  else if(target.dataset.entRule!==undefined){
   const rule=entState.adminRules[Number(target.dataset.entRule)];
   if(rule)entMetaManual(rule);
  }
  else if(target.id==='entManualNew')entMetaManual();
- else if(target.id==='entEditClose')$('entEditDialog').close();
+ else if(target.id==='entAdminCatalogEdit'){
+  const index=Number($('entAdminCatalogPicker').value);
+  const row=entState.adminCatalog[index];
+  if(!Number.isInteger(index)||!row){message('Najpierw wybierz uprawnienie.',true);return}
+  entMetaManual(row);
+ }
  else if(target.id==='entReportClose')$('entReportDialog').close();
 });
-$('entEditForm').addEventListener('submit',entSaveMetadata);
 $('entReportForm').addEventListener('submit',entSubmitReport);
 $('entManualForm').addEventListener('submit',entManualSave);
 $('entGraphForm').addEventListener('submit',entGraphSave);
 $('entImportForm').addEventListener('submit',entImportSave);
-$('entEditCancel').onclick=()=>$('entEditDialog').close();
 $('entManualCancel').onclick=()=>$('entManualDialog').close();
 $('entReportCancel').onclick=()=>$('entReportDialog').close();

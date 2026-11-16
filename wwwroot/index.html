@@ -90,7 +90,12 @@
 <div class="settingsCard" style="max-width:none;margin-top:18px">
 <div class="toolbar"><h2>Opisy i wykluczenia z prezentacji</h2>
 <button type="button" id="entManualNew" class="secondary">+ Dodaj regułę ręcznie</button></div>
-<p>Przykład: dla grupy <code>Domain Users</code> ustaw ukrycie, a dla grupy związanej z serwerem wpisz, do jakich zasobów daje dostęp. Klucz musi odpowiadać rzeczywistemu identyfikatorowi zwracanemu ze źródła.</p>
+<p>Reguły może edytować wyłącznie administrator portalu w tej sekcji. Ukrycie dotyczy prezentacji, nie zmienia członkostwa w AD ani uprawnień. W audycie pozycja pozostaje dostępna.</p>
+<div class="entAdminPicker"><label>Wybierz uprawnienie z aktualnego katalogu administratora
+<select id="entAdminCatalogPicker"><option value="">Pobieranie...</option></select></label>
+<button type="button" class="secondary" id="entAdminCatalogEdit">Ustaw opis / ukrycie</button></div>
+<p class="meta" id="entAdminCatalogStatus"></p>
+<p class="meta">Dla pozostałych grup (np. <code>Domain Users</code>) użyj „Dodaj regułę ręcznie” i podaj źródło oraz dokładny klucz.</p>
 <div id="entRules"></div></div>
 <div class="settingsCard" style="max-width:none;margin-top:18px">
 <h2>Import danych Exchange / SMB / SharePoint</h2>
@@ -163,16 +168,7 @@
   <div class="handoverNotice">Zgłoszenie trafi do administracji i będzie wymagało ręcznej oceny właściciela dostępu. Nie zmieni automatycznie członkostwa AD, ACL ani ról Entra.</div>
   <div class="actions"><button type="button" class="secondary" id="permissionReportCancel">Anuluj</button>
     <button type="submit" class="primary" id="permissionReportSubmit">Wyślij zgłoszenie</button></div>
-</form></dialog><dialog id="entEditDialog"><form id="entEditForm">
-<div class="dialogTop"><div><p class="eyebrow">ADMIN / KATALOG UPRAWNIEŃ</p><h2 id="entEditTitle">Opis uprawnienia</h2></div>
-<button type="button" class="icon" id="entEditClose">×</button></div>
-<input type="hidden" id="entEditSource"><input type="hidden" id="entEditKey">
-<label>Opis i przeznaczenie uprawnienia<textarea id="entEditNote" rows="4" maxlength="2000" placeholder="np. Dostęp do katalogu produkcyjnego na FILE01"></textarea></label>
-<label class="entCheck"><input id="entEditHidden" type="checkbox"> Ukryj przed użytkownikami i kierownikami</label>
-<p class="handoverNotice">Wykluczenie dotyczy wyłącznie prezentacji. Nie zmienia członkostwa, uprawnień ani zapisu w audycie. Administrator nadal widzi wpis.</p>
-<div class="actions"><button type="button" class="secondary" id="entEditCancel">Anuluj</button>
-<button class="primary" type="submit" id="entEditSave">Zapisz</button></div></form></dialog>
-<dialog id="entReportDialog"><form id="entReportForm">
+</form></dialog><dialog id="entReportDialog"><form id="entReportForm">
 <div class="dialogTop"><h2 id="entReportHeading">Zgłoś uprawnienie</h2>
 <button id="entReportClose" class="icon" type="button">×</button></div>
 <p class="meta" id="entReportIdentity"></p>
