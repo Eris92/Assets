@@ -213,7 +213,6 @@ async function signIn() {
     $('authPanel').hidden=false;
     $('identity').textContent='Nie odczytano konta';
     $('identityRole').textContent=e.status===401?'Blad logowania Windows':'Blad aplikacji / API';
-    $('accountBadge').textContent=$('identityRole').textContent;
     $('authTitle').textContent=e.status===401?'IIS nie przekazal tozsamosci Windows':'Nie udalo sie sprawdzic konta';
     $('authDetail').textContent=e.message+(e.status===401?' Windows Authentication jest wymagane. Jesli jest juz wlaczone, sprawdz odpowiedz /api/me, kod IIS 401.x i negocjacje przegladarki.':' Sprawdz logi aplikacji i wynik scripts/Test-PortalAccess.ps1.');
   } finally {$('retryLogin').disabled=false;}
