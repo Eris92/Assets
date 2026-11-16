@@ -38,6 +38,9 @@ jobs:
       - run: dotnet restore AssetsPortal.csproj
       - run: dotnet build AssetsPortal.csproj -c Release --no-restore
       - run: dotnet publish AssetsPortal.csproj -c Release -r win-x64 --self-contained false -p:UseAppHost=false -o out/AssetsPortal
+      - name: Smoke test published app startup
+        shell: pwsh
+        run: ./scripts/Test-Startup.ps1 -PublishPath out/AssetsPortal
       - name: Verify framework-dependent publish
         shell: pwsh
         run: |

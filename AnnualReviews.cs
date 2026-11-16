@@ -323,7 +323,7 @@ internal sealed class PortalNotificationService {
 internal sealed class ReviewReminderWorker : BackgroundService {
     private readonly IServiceProvider services;
     private readonly ILogger<ReviewReminderWorker> logger;
-    internal ReviewReminderWorker(IServiceProvider services,ILogger<ReviewReminderWorker> logger) {
+    public ReviewReminderWorker(IServiceProvider services,ILogger<ReviewReminderWorker> logger) {
         this.services=services;this.logger=logger;
     }
     protected override async Task ExecuteAsync(CancellationToken stoppingToken) {
