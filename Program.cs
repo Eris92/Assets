@@ -495,13 +495,37 @@ app.MapDelete("/api/admin/access/{sid}", async (HttpContext ctx, IAntiforgery an
     return Results.NoContent();
 });
 
+app.MapPost("/api/admin/access/group", async (HttpContext ctx, IAntiforgery anti, AdminGroupInput input) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    await anti.ValidateRequestAsync(ctx);
+    if (!IsValidText(input.AdminGroup, 256))
+        return Results.BadRequest(new { error = "Provide an AD group or SID." });
+    try {
+        var group = input.AdminGroup.Trim();
+        var sid = group.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)
+            ? new SecurityIdentifier(group)
+            : (SecurityIdentifier)new NTAccount(group).Translate(typeof(SecurityIdentifier));
+        if (ctx.User.Identity is not WindowsIdentity identity || !new WindowsPrincipal(identity).IsInRole(sid))
+            return Results.Forbid();
+        using var db = new SqliteConnection(ConnectionString()); db.Open();
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "INSERT INTO Settings(Key,Value) VALUES('AdminGroup',$value) ON CONFLICT(Key) DO UPDATE SET Value=excluded.Value";
+        cmd.Parameters.AddWithValue("$value", group);
+        cmd.ExecuteNonQuery();
+        app.Logger.LogInformation("Portal admin group updated by {User}", ctx.User.Identity.Name);
+        return Results.Ok();
+    } catch (Exception ex) when (ex is IdentityNotMappedException or ArgumentException) {
+        return Results.BadRequest(new { error = "AD group could not be resolved." });
+    }
+});
+
 app.MapGet("/api/admin/settings", (HttpContext ctx) => {
     if (!IsAdmin(ctx.User)) return AuthError(ctx);
     return Results.Ok(new {
         siteUrl = Setting("SiteUrl", "Jira:SiteUrl"), accountEmail = Setting("AccountEmail", "Jira:AccountEmail"),
         cloudId = Setting("CloudId", "Jira:CloudId"), workspaceId = Setting("WorkspaceId", "Jira:WorkspaceId"),
         aql = Setting("Aql", "Jira:Aql"), ownerAttributeId = Setting("OwnerAttributeId", "Jira:OwnerAttributeId"),
-        allowedCorrectionAttributeIds = AllowedAttributes(), adminGroup = Setting("AdminGroup", "Portal:AdminGroup"),
+        allowedCorrectionAttributeIds = AllowedAttributes(),
         handoverGroup = Setting("HandoverGroup", "Portal:HandoverGroup") ?? "",
         tokenConfigured = !string.IsNullOrWhiteSpace(JiraToken())
     });
@@ -515,19 +539,12 @@ app.MapPost("/api/admin/settings", async (HttpContext ctx, IAntiforgery anti, Se
         !IsValidText(input.AccountEmail, 254) || !Guid.TryParse(input.CloudId, out _) ||
         (!string.IsNullOrWhiteSpace(input.WorkspaceId) && !Guid.TryParse(input.WorkspaceId, out _)) ||
         (input.Aql?.Length ?? 0) > 2000 || !IsValidText(input.OwnerAttributeId, 32) ||
-        !long.TryParse(input.OwnerAttributeId, out _) || !IsValidText(input.AdminGroup, 256) ||
+        !long.TryParse(input.OwnerAttributeId, out _) ||
         input.AllowedCorrectionAttributeIds is null || input.AllowedCorrectionAttributeIds.Length > 50 ||
         input.AllowedCorrectionAttributeIds.Any(id => !long.TryParse(id, out _)) ||
         input.ApiToken?.Length > 1000 || (input.HandoverGroup?.Length ?? 0) > 256)
         return Results.BadRequest(new { error = "Invalid settings" });
     try {
-        var group = input.AdminGroup.Trim();
-        if (!group.Equals(Setting("AdminGroup", "Portal:AdminGroup"), StringComparison.OrdinalIgnoreCase)) {
-            var sid = group.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase) ? new SecurityIdentifier(group)
-                : (SecurityIdentifier)new NTAccount(group).Translate(typeof(SecurityIdentifier));
-            if (!new WindowsPrincipal((WindowsIdentity)ctx.User.Identity!).IsInRole(sid))
-                return Results.BadRequest(new { error = "You must belong to the configured admin group" });
-        }
         using var db = new SqliteConnection(ConnectionString()); db.Open();
         using var transaction = db.BeginTransaction();
         void Save(string key, string value) {
@@ -542,7 +559,6 @@ app.MapPost("/api/admin/settings", async (HttpContext ctx, IAntiforgery anti, Se
         Save("Aql", input.Aql?.Trim() ?? "");
         Save("OwnerAttributeId", input.OwnerAttributeId.Trim());
         Save("AllowedCorrectionAttributeIds", string.Join(',', input.AllowedCorrectionAttributeIds.Distinct()));
-        Save("AdminGroup", group);
         if (!string.IsNullOrWhiteSpace(input.HandoverGroup)) {
             var handoverGroup = input.HandoverGroup.Trim();
             // Validate the delegated AD group at configuration time.
@@ -1232,7 +1248,7 @@ app.MapGet("/api/team", async (HttpContext ctx) => {
         var people = EffectiveTeam(actor);
         if (people.Length == 0) return Results.Ok(new { people = Array.Empty<object>(), equipment = Array.Empty<object>(), error = "No AD manager hierarchy, configured team.json or substitute assignment for this user." });
         var ownerId = Setting("OwnerAttributeId", "Jira:OwnerAttributeId");
-        if (!long.TryParse(ownerId,out _)) return Results.Problem("Configure Jira OwnerAttributeId", statusCode:503);
+        if (!long.TryParse(ownerId,out _)) return Results.Ok(new { people = people.Select(p=>new { id=p.Login, name=p.Name, role=p.Role, manager=LoginKey(p.Manager)==LoginKey(actor) ? "me" : p.Manager, delegated=false }), equipment=Array.Empty<object>(), inventoryComplete=false, inventoryError="Nie skonfigurowano pola wlasciciela Jira." });
         var delegatedRoots = delegations.ByDelegate(actor).Select(x=>x.ManagerLogin).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var directTeam = ReportsTo(actor).Select(p=>p.Login).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var configured = Setting("Aql","Jira:Aql");
@@ -1289,17 +1305,16 @@ app.MapGet("/api/team", async (HttpContext ctx) => {
             } finally { gate.Release(); }
         });
         await Task.WhenAll(tasks);
-        if (!failures.IsEmpty) {
-            return Results.Problem("Nie udalo sie pobrac sprzetu wszystkich pracownikow. Nie pokazano niepelnej listy. Sprawdz AD/Jira i logi.",
-                statusCode:502);
-        }
+        var inventoryComplete = failures.IsEmpty;
         return Results.Ok(new {
             people=people.Select(p=>new {
                 id=p.Login,name=p.Name,role=p.Role,
                 manager=LoginKey(p.Manager)==LoginKey(actor) || delegatedRoots.Contains(p.Manager) ? "me" : p.Manager,
                 delegated=!directTeam.Contains(p.Login)
             }),
-            equipment=equipment.OrderBy(x=>System.Text.Json.JsonSerializer.Serialize(x)).ToArray()
+            equipment=inventoryComplete ? equipment.OrderBy(x=>System.Text.Json.JsonSerializer.Serialize(x)).ToArray() : Array.Empty<object>(),
+            inventoryComplete,
+            inventoryError=inventoryComplete ? null : "Nie udalo sie zweryfikowac sprzetu wszystkich pracownikow. Lista AD jest dostepna, ale status sprzetu pozostaje nieznany."
         });
     } catch (Exception ex) {
         app.Logger.LogError(ex,"Team query failed");
@@ -2086,8 +2101,9 @@ record GraphConfigurationInput(string TenantId,string ClientId,string Certificat
 record TeamMember(string Login, string Name, string Manager, string? Role = null);
 record DecisionInput(string Action);
 record SettingsInput(string SiteUrl, string AccountEmail, string CloudId, string? WorkspaceId, string? Aql,
-    string OwnerAttributeId, string[] AllowedCorrectionAttributeIds, string AdminGroup, string? ApiToken,
+    string OwnerAttributeId, string[] AllowedCorrectionAttributeIds, string? ApiToken,
     string? HandoverGroup = null);
+record AdminGroupInput(string AdminGroup);
 record HandoverProtocolInput(string Mode, string? SourceLogin, string? TargetLogin, string[] AssetIds,
     string? Notes, string? IntermediateLogin = null, string? EvidenceMode = null);
 record HandoverActionInput(string Action, bool Confirmed, string? EvidenceSha256 = null);
