@@ -1,6 +1,7 @@
 async function loadAccess() {
   try {
     const data=await api('/api/admin/access');
+    $('adminGroup').value=data.bootstrapGroup || '';
     $('accessBootstrap').textContent='Administrator awaryjny: '+(data.bootstrapGroup || '-')+(data.bootstrapUsers.length?' | '+data.bootstrapUsers.join(', '):'')+'. Konta awaryjne konfiguruje administrator serwera.';
     $('accessRows').innerHTML=data.rules.length?`<div class="equipmentTableWrap"><table class="equipmentTable"><thead><tr><th>Konto / grupa</th><th>Typ</th><th>Rola</th><th>Dostep</th><th>Akcja</th></tr></thead><tbody>${data.rules.map(r=>`<tr><td><strong>${escapeHtml(r.name)}</strong><small>${escapeHtml(r.sid)}</small></td><td>${r.kind==='Group'?'Grupa':'Uzytkownik'}</td><td>${r.role==='Admin'?'Administrator':'Uzytkownik'}</td><td>${r.effect==='Deny'?'Zablokowany':'Dozwolony'}</td><td><button class="secondary" data-access-edit="${escapeHtml(r.sid)}">Edytuj</button> <button class="secondary" data-access-remove="${escapeHtml(r.sid)}">Usun</button></td></tr>`).join('')}</tbody></table></div>`:'<p class="empty">Brak regul dostepu. Dostep maja tylko administratorzy awaryjni. Dodaj uzytkownika lub grupe AD.</p>';
     $('accessRows')._rules=data.rules;
@@ -24,3 +25,13 @@ $('accessRows').addEventListener('click',async e=>{
   catch(err){message(err.message,true);button.disabled=false;}
 });
 $('refreshAccess').onclick=loadAccess;
+
+$('adminGroupForm').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const button=$('adminGroupSave');button.disabled=true;
+  try {
+    await api('/api/admin/access/group',{method:'POST',body:JSON.stringify({adminGroup:$('adminGroup').value.trim()})});
+    await loadAccess();message('Grupa administratorow zostala zapisana.');
+  } catch(error) { message(error.message,true); }
+  finally { button.disabled=false; }
+});
