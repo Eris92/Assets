@@ -408,7 +408,7 @@ async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
     if (string.IsNullOrWhiteSpace(aql)) throw new InvalidOperationException("Jira AQL is not configured");
     var entries = new List<JsonNode>();
     for (var page = 1; page <= 100; page++) {
-        const int pageSize = 100;
+        const int pageSize = 500;
         var result = await Jira(HttpMethod.Post, $"object/aql?startAt={entries.Count}&maxResults={pageSize}&includeAttributes=true", new { qlQuery = aql });
         var batch = JiraAssetWorkflow.Entries(result);
         // Jira may return attribute names separately in objectTypeAttributes.
