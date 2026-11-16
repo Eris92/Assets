@@ -438,17 +438,25 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
     var ownerAttributeId=Setting("OwnerAttributeId","Jira:OwnerAttributeId") ??
         throw new InvalidOperationException("OwnerAttributeId must be configured");
     var configuredAql=Setting("Aql","Jira:Aql");
-    if(!string.IsNullOrWhiteSpace(configuredAql)) {
+    // Use MC-SIRK's confirmed equipment subtree when no custom scope is defined.
+    // Keep the scoped exact-owner filter; never return unfiltered Jira inventory.
+    var equipmentAql=string.IsNullOrWhiteSpace(configuredAql)
+        ? "objectType in objectTypeAndChildren(\\"Sprzęt użytkownika\\")"
+        : configuredAql;
+    try {
         // Legacy behavior restored: query configured AQL (ALL pages) and filter
         // the specified owner attribute on the server, never in the browser.
         // This retains SAMAccountName / DOMAIN\sam mappings stored by Jira.
-        var scope=await QueryAssets(configuredAql);
+        var scope=await QueryAssets(equipmentAql);
         var assigned=scope.Where(obj=>JiraAssetOwnership.Matches(obj,ownerAttributeId,aliases)).ToArray();
         foreach(var obj in assigned) {
             var id=obj["id"]?.ToString();
             if(!string.IsNullOrWhiteSpace(id))rows.TryAdd(id,obj);
         }
-        matches.Add((identity,"Configured AQL + owner attribute",assigned.Length));
+        matches.Add((identity,"Equipment AQL + owner attribute",assigned.Length));
+    } catch(Exception ex) {
+        app.Logger.LogWarning(ex,"Jira equipment AQL unavailable; attempting exact email-reference query");
+        matches.Add((identity,"Equipment AQL (unavailable)",0));
     }
     // Also support the newer Jira Assets owner-reference query when available.
     // If the configured legacy scope already works, failure of the optional
@@ -461,13 +469,13 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
                 if(!string.IsNullOrWhiteSpace(id))rows.TryAdd(id,obj);
             }
             matches.Add((candidate.Email,candidate.Source,owned.Count));
-        } catch(Exception ex) when(!string.IsNullOrWhiteSpace(configuredAql)) {
+        } catch(Exception ex) {
             app.Logger.LogWarning(ex,"Optional Jira owner-reference query failed for {Source}",candidate.Source);
             matches.Add((candidate.Email,candidate.Source+" (unavailable)",0));
         }
     }
-    if(string.IsNullOrWhiteSpace(configuredAql) && emails.Count==0)
-        throw new InvalidOperationException("Configure Jira AQL or resolve an AD email for this user");
+    if(matches.All(x=>x.Source.Contains("unavailable",StringComparison.OrdinalIgnoreCase)))
+        throw new InvalidOperationException("Both Jira ownership query methods failed");
     return (rows.Values.ToList(),matches.ToArray());
 }
 
