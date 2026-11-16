@@ -356,7 +356,7 @@ List<(string Email, string Source)> OwnerEmailCandidates(ClaimsPrincipal user) {
 // Match the authenticated AD identity to Jira's canonical user directory,
 // following MC-SIRK's /rest/api/3/users/search pagination contract.
 // Display names are accepted only when unique within the complete Jira directory.
-async Task<string[]> JiraIdentityAliasesForEmails(IEnumerable<string> emails, CancellationToken cancellationToken) {
+async Task<string[]> JiraIdentityAliasesForEmails(IEnumerable<string> emails, string? adDisplayName, CancellationToken cancellationToken) {
     var site = Setting("SiteUrl", "Jira:SiteUrl");
     if (!Uri.TryCreate(site, UriKind.Absolute, out var baseUri) ||
         baseUri.Scheme != Uri.UriSchemeHttps || !baseUri.IsDefaultPort ||
@@ -392,6 +392,14 @@ async Task<string[]> JiraIdentityAliasesForEmails(IEnumerable<string> emails, Ca
         throw new InvalidOperationException("Jira users directory exceeded safe lookup bound");
     var matched=users.Where(x=>wanted.Contains(x.Email))
         .GroupBy(x=>x.Id,StringComparer.Ordinal).Select(x=>x.First()).ToArray();
+    // Jira Cloud may hide user emailAddress from API responses.
+    // Only use an AD display name when it resolves to exactly one Jira account.
+    if(matched.Length==0 && !string.IsNullOrWhiteSpace(adDisplayName)) {
+        var candidates=users.Where(x=>string.Equals(x.Name,adDisplayName.Trim(),
+            StringComparison.OrdinalIgnoreCase))
+            .GroupBy(x=>x.Id,StringComparer.Ordinal).Select(x=>x.First()).ToArray();
+        if(candidates.Length==1) matched=candidates;
+    }
     var aliases=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach(var user in matched) {
         aliases.Add(user.Id);
@@ -441,11 +449,17 @@ async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
 async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Matches)> QueryMyAssets(ClaimsPrincipal user) {
     var identity=user.Identity?.Name??throw new InvalidOperationException("Windows identity unavailable");
     var emails=OwnerEmailCandidates(user);
+    string? adDisplayName=null;
+    try {
+        adDisplayName=HandoverDirectory.Resolve(identity).Name;
+    } catch(Exception ex) {
+        app.Logger.LogWarning(ex,"Unable to resolve AD display name for Jira identity mapping");
+    }
     var aliases=JiraAssetOwnership.Aliases(identity,emails.Select(x=>x.Email)).ToHashSet(StringComparer.OrdinalIgnoreCase);
     // MC-SIRK uses the Jira accountId in Osoba_odpowiedzialna (value/searchValue).
     // Resolve the AD email to the same stable identity before matching assets.
     try {
-        foreach (var id in await JiraIdentityAliasesForEmails(emails.Select(x=>x.Email), CancellationToken.None))
+        foreach (var id in await JiraIdentityAliasesForEmails(emails.Select(x=>x.Email), adDisplayName, CancellationToken.None))
             aliases.Add(id);
     } catch (Exception ex) {
         app.Logger.LogWarning(ex, "Jira accountId lookup unavailable; no unverified identity aliases added");
