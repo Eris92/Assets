@@ -441,7 +441,7 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
     // Use MC-SIRK's confirmed equipment subtree when no custom scope is defined.
     // Keep the scoped exact-owner filter; never return unfiltered Jira inventory.
     var equipmentAql=string.IsNullOrWhiteSpace(configuredAql)
-        ? "objectType in objectTypeAndChildren(\\"Sprzęt użytkownika\\")"
+        ? "objectType in objectTypeAndChildren(\"Sprzęt użytkownika\")"
         : configuredAql;
     try {
         // Legacy behavior restored: query configured AQL (ALL pages) and filter
