@@ -115,7 +115,14 @@ async function loadReports() {
   try {
     const rows = await api('/api/reports');
     $('reports').innerHTML = rows.filter(r => r.reporter.toLowerCase() === me.name.toLowerCase()).map(r => reportRow(r,false)).join('') || '<p class="empty">Nie masz jeszcze zgłoszeń.</p>';
-    if (me.admin) { $('adminReports').innerHTML = rows.map(r => reportRow(r,true)).join('') || '<p class="empty">Brak zgłoszeń.</p>'; const count = rows.filter(r => r.status === 'Pending' || r.status === 'NeedsRegistration' || r.status === 'NeedsAccessReview').length; $('pendingCount').textContent = String(count); }
+    if (me.admin) { $('adminReports').innerHTML = rows.map(r => reportRow(r,true)).join('') || '<p class="empty">Brak zgłoszeń.</p>'; const count = rows.filter(r => r.status === 'Pending' || r.status === 'NeedsRegistration' || r.status === 'NeedsAccessReview').length;
+      $('pendingCount').textContent = String(count);
+      const groupBadge=$('administrationPendingBadge');
+      groupBadge.textContent=String(count);
+      groupBadge.classList.toggle('pending',count>0);
+      groupBadge.classList.toggle('clear',count===0);
+      groupBadge.hidden=false;
+      groupBadge.setAttribute('aria-label',count===0?'Brak zgłoszeń do obsługi':count+' zgłoszeń do obsługi'); }
   } catch(e) { message(e.message,true); }
 }
 for (const id of ['equipment','permissions','reviewsGroup','management','administration','settings']) {
@@ -182,6 +189,7 @@ setupEquipmentFilters('asset','assetFilters',renderPersonalEquipment);
 function hideProtectedViews() {
   for(const item of ['assets','team','delegations','handover','permissions','teamPermissions','teamReviews','reviews','custodyInbox','reports','admin','settings','notificationSettings','deployment','audit','entra','access']) $(item+'View').hidden=true;
   $('adminNav').hidden=$('settingsGroup').hidden=$('administrationGroup').hidden=true;
+  $('administrationPendingBadge').hidden=true;
   $('handoverNav').hidden=true;
   $('entitlementAdminNav').hidden=true;
   $('delegationsNav').hidden=true;
