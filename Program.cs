@@ -417,7 +417,7 @@ var aqlCache = new System.Collections.Concurrent.ConcurrentDictionary<string,
     (DateTimeOffset Expires,List<JsonNode> Items)>(StringComparer.Ordinal);
 var aqlLocks = new System.Collections.Concurrent.ConcurrentDictionary<string,SemaphoreSlim>(StringComparer.Ordinal);
 var aqlTtl = TimeSpan.FromMinutes(3);
-string InventoryScopeAql() => "objectType in objectTypeAndChildren(\\"Sprzęt użytkownika\\")";
+string InventoryScopeAql() => "objectType in objectTypeAndChildren(\"Sprzęt użytkownika\")";
 async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null, bool force = false) {
     var aql = aqlOverride ?? Setting("Aql", "Jira:Aql");
     if(string.IsNullOrWhiteSpace(aql))
