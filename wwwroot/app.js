@@ -276,7 +276,7 @@ async function loadDeployment() {
   try {
     const state = await api('/api/admin/deployment');
     $('deploymentVersion').textContent = state.currentVersion || 'Nieznana';
-    $('deploymentWorker').textContent = state.enabled ? 'Zainstalowany' : 'Brak - instalacja workera wymagana';
+    $('deploymentWorker').textContent = state.workerMessage || (state.enabled ? 'Worker aktywny' : 'Worker niedostepny');
     const last = state.last || {};
     $('deploymentStatus').textContent = (last.state || 'Brak operacji') +
       (last.action ? ' | ' + last.action : '') +
