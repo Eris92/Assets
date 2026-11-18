@@ -629,11 +629,41 @@ app.MapGet("/api/admin/jira/ownership-diagnostics", async (HttpContext ctx) => {
                 || string.Equals(o["label"]?.ToString(),key,StringComparison.OrdinalIgnoreCase))
                 && JiraAssetOwnership.Matches(o,ownerId,aliases))
         }).ToArray();
+        // Admin-only bounded shape inspection for the four confirmed assets.
+        // Do not return unrelated attributes, tokens, or whole Jira objects.
+        var ownerSamples=examples.Select(key => {
+            var asset=scope.FirstOrDefault(o=>
+                string.Equals(o["objectKey"]?.ToString(),key,StringComparison.OrdinalIgnoreCase)
+                || string.Equals(o["label"]?.ToString(),key,StringComparison.OrdinalIgnoreCase));
+            var attrs=(asset?["attributes"] as JsonArray ?? new JsonArray())
+                .Where(a=>a?["objectTypeAttributeId"]?.ToString()==ownerId ||
+                    string.Equals(a?["objectTypeAttribute"]?["name"]?.ToString(),
+                        attributeName,StringComparison.OrdinalIgnoreCase))
+                .Select(a=>new {
+                    attributeId=a?["objectTypeAttributeId"]?.ToString(),
+                    attributeName=a?["objectTypeAttribute"]?["name"]?.ToString(),
+                    values=(a?["objectAttributeValues"] as JsonArray ?? new JsonArray())
+                        .Take(8).Select(v=>new {
+                            value=v?["value"]?.ToString(),
+                            searchValue=v?["searchValue"]?.ToString(),
+                            displayValue=v?["displayValue"]?.ToString(),
+                            userAccountId=v?["user"]?["accountId"]?.ToString(),
+                            referenceId=v?["referencedObject"]?["id"]?.ToString(),
+                            referenceKey=v?["referencedObject"]?["objectKey"]?.ToString(),
+                            referenceLabel=v?["referencedObject"]?["label"]?.ToString(),
+                            referenceType=v?["referencedObject"]?["objectType"]?["name"]?.ToString(),
+                            referenceAttributeNames=(v?["referencedObject"]?["attributes"] as JsonArray ?? new JsonArray())
+                                .Select(x=>x?["objectTypeAttribute"]?["name"]?.ToString())
+                                .Where(x=>!string.IsNullOrWhiteSpace(x)).Take(12).ToArray()
+                        }).ToArray()
+                }).ToArray();
+            return new { key, attributes=attrs };
+        }).ToArray();
         return Results.Ok(new {
             identityStatus, jiraAliasCount, adDisplayNameAvailable=!string.IsNullOrWhiteSpace(ad?.Name),
             configuredOwnerAttribute=long.TryParse(ownerId,out _),
             scopeObjects=scope.Count, scopeOwnerAttributes,scopeConfiguredAttributes,matches,
-            knownAssets
+            knownAssets, ownerSamples
         });
     } catch(Exception ex) {
         app.Logger.LogError(ex,"Jira ownership diagnostics failed");
