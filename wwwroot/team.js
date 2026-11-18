@@ -51,7 +51,7 @@ async function loadTeam(force=false){
   try{
     if(!teamLoaded||force){
       $('teamAssets').innerHTML='<p class="empty">Pobieranie sprzetu zespolu z Jira...</p>';
-      const data=await api('/api/team');
+      const data=await api(force?'/api/team?refresh=1':'/api/team');
       teamPeople=data.people||[];teamEquipment=data.equipment||[];teamInventoryComplete=data.inventoryComplete===true;teamInventoryError=data.inventoryError||'';teamLoaded=true;
     }
     renderTeam();
