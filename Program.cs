@@ -528,11 +528,13 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
         app.Logger.LogWarning(ex,"Unable to resolve AD display name for Jira identity mapping");
     }
     var aliases=JiraAssetOwnership.Aliases(identity,emails.Select(x=>x.Email)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-    // MC-SIRK uses the Jira accountId in Osoba_odpowiedzialna (value/searchValue).
+    var verifiedJiraIdentity=false;
+    // Jira Assets Users references are distinct from Jira account IDs.
     // Resolve the AD email to the same stable identity before matching assets.
     try {
-        foreach (var id in await JiraIdentityAliasesForEmails(emails.Select(x=>x.Email), adDisplayName, CancellationToken.None))
-            aliases.Add(id);
+        var jiraIdentities=await JiraIdentityAliasesForEmails(emails.Select(x=>x.Email), adDisplayName, CancellationToken.None);
+        verifiedJiraIdentity=jiraIdentities.Length>0;
+        foreach (var id in jiraIdentities) aliases.Add(id);
     } catch (Exception ex) {
         app.Logger.LogWarning(ex, "Jira accountId lookup unavailable; no unverified identity aliases added");
     }
@@ -549,6 +551,10 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
         // the specified owner attribute on the server, never in the browser.
         // This retains SAMAccountName / DOMAIN\sam mappings stored by Jira.
         var scope=await QueryAssets(equipmentAql);
+        if(verifiedJiraIdentity && !string.IsNullOrWhiteSpace(adDisplayName)) {
+            foreach(var alias in JiraAssetOwnership.UniqueReferencedOwnerAliases(
+                scope,ownerAttributeId,adDisplayName))aliases.Add(alias);
+        }
         var assigned=scope.Where(obj=>JiraAssetOwnership.Matches(obj,ownerAttributeId,aliases)).ToArray();
         foreach(var obj in assigned) {
             var id=obj["id"]?.ToString();
@@ -611,6 +617,10 @@ app.MapGet("/api/admin/jira/ownership-diagnostics", async (HttpContext ctx) => {
                 attributeName,StringComparison.OrdinalIgnoreCase));
         var scopeConfiguredAttributes=scope.SelectMany(o=>o["attributes"] as JsonArray ?? new JsonArray())
             .Count(a=>a?["objectTypeAttributeId"]?.ToString()==ownerId);
+        var ownerReferenceAliases=identityStatus=="resolved" && !string.IsNullOrWhiteSpace(ad?.Name)
+            ? JiraAssetOwnership.UniqueReferencedOwnerAliases(scope,ownerId,ad.Name)
+            : [];
+        foreach(var alias in ownerReferenceAliases)aliases.Add(alias);
         var matches=scope.Count(o=>JiraAssetOwnership.Matches(o,ownerId,aliases));
         var examples=new[]{"K24-085","M25-021","M25-022","SD/2022/035"};
         var knownAssets=examples.Select(key=>new {
@@ -663,6 +673,7 @@ app.MapGet("/api/admin/jira/ownership-diagnostics", async (HttpContext ctx) => {
             identityStatus, jiraAliasCount, adDisplayNameAvailable=!string.IsNullOrWhiteSpace(ad?.Name),
             configuredOwnerAttribute=long.TryParse(ownerId,out _),
             scopeObjects=scope.Count, scopeOwnerAttributes,scopeConfiguredAttributes,matches,
+            ownerReferenceResolved=ownerReferenceAliases.Length>0,
             knownAssets, ownerSamples
         });
     } catch(Exception ex) {
