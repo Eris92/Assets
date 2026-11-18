@@ -411,8 +411,35 @@ async Task<string[]> JiraIdentityAliasesForEmails(IEnumerable<string> emails, st
     return aliases.ToArray();
 }
 
-async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
+// Shared AQL snapshots are backend-only. User authorization and ownership checks
+// are performed on each request, never cached across principals.
+var aqlCache = new System.Collections.Concurrent.ConcurrentDictionary<string,
+    (DateTimeOffset Expires,List<JsonNode> Items)>(StringComparer.Ordinal);
+var aqlLocks = new System.Collections.Concurrent.ConcurrentDictionary<string,SemaphoreSlim>(StringComparer.Ordinal);
+var aqlTtl = TimeSpan.FromMinutes(3);
+string InventoryScopeAql() => "objectType in objectTypeAndChildren(\\"Sprzęt użytkownika\\")";
+async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null, bool force = false) {
     var aql = aqlOverride ?? Setting("Aql", "Jira:Aql");
+    if(string.IsNullOrWhiteSpace(aql))
+        throw new InvalidOperationException("Jira AQL is not configured");
+    // Do not reuse a cached inventory after a Jira connection/config change.
+    var key=string.Join("|",Setting("SiteUrl","Jira:SiteUrl"),
+        Setting("WorkspaceId","Jira:WorkspaceId"),
+        Setting("CloudId","Jira:CloudId"),aql);
+    if(!force && aqlCache.TryGetValue(key,out var hit) && hit.Expires>DateTimeOffset.UtcNow)
+        return hit.Items;
+    var gate=aqlLocks.GetOrAdd(key,_=>new SemaphoreSlim(1,1));
+    await gate.WaitAsync();
+    try {
+        if(!force && aqlCache.TryGetValue(key,out hit) && hit.Expires>DateTimeOffset.UtcNow)
+            return hit.Items;
+        var items=await FetchAssetsFromJira(aql);
+        aqlCache[key]=(DateTimeOffset.UtcNow.Add(aqlTtl),items);
+        return items;
+    } finally {gate.Release();}
+}
+
+async Task<List<JsonNode>> FetchAssetsFromJira(string aql) {
     if (string.IsNullOrWhiteSpace(aql)) throw new InvalidOperationException("Jira AQL is not configured");
     var entries = new List<JsonNode>();
     // Jira may cap totalFilterCount. Use the authoritative count endpoint
