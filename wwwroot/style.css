@@ -175,3 +175,12 @@ main>section,main>.settingsCard,main>.toolbar{min-width:0;max-width:100%;}
  .teamLayout{grid-template-columns:1fr;}
  .settingsGrid{grid-template-columns:minmax(0,1fr);}
 }
+
+/* Dashboard and collapsed sidebar groups */
+nav .equipmentSubnav[hidden]{display:none!important;}
+nav>.equipmentGroup{min-width:0;}
+.overviewGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:18px 0;}
+.overviewGrid button{display:flex;flex-direction:column;gap:10px;align-items:flex-start;text-align:left;border:1px solid #dce6eb;border-radius:12px;background:#fff;padding:22px;min-height:115px;color:#183047;}
+.overviewGrid button:hover{border-color:#52aa9e;box-shadow:0 5px 20px #15374a12;}
+.overviewGrid strong{font-size:30px;font-weight:750;color:#086c72;}
+.overviewGrid span{font-weight:600;font-size:14px;}
