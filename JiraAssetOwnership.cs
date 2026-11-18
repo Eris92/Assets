@@ -15,6 +15,37 @@ internal static class JiraAssetOwnership {
         }
         return values.ToArray();
     }
+    // Assets ownership is a reference to an Assets Users object (CMDB-*),
+    // not to a Jira accountId. Only resolve a display-name candidate if it
+    // maps to exactly one referenced Users object across the complete scope.
+    // The caller must separately authenticate the AD/Jira identity first.
+    internal static string[] UniqueReferencedOwnerAliases(
+        IEnumerable<JsonNode> assets, string ownerAttributeId, string verifiedDisplayName) {
+        if(string.IsNullOrWhiteSpace(verifiedDisplayName))return [];
+        var matches=new Dictionary<string,(string Key,string Label)>(StringComparer.OrdinalIgnoreCase);
+        foreach(var asset in assets) {
+            if(asset["attributes"] is not JsonArray attributes)continue;
+            foreach(var attribute in attributes) {
+                if(attribute?["objectTypeAttributeId"]?.ToString()!=ownerAttributeId &&
+                    !string.Equals(attribute?["objectTypeAttribute"]?["name"]?.ToString(),
+                        "Osoba_odpowiedzialna",StringComparison.OrdinalIgnoreCase))continue;
+                foreach(var value in attribute?["objectAttributeValues"] as JsonArray ?? new JsonArray()) {
+                    var reference=value?["referencedObject"];
+                    if(reference is null || !string.Equals(reference["objectType"]?["name"]?.ToString(),
+                        "Users",StringComparison.OrdinalIgnoreCase))continue;
+                    var label=reference["label"]?.ToString() ?? value?["displayValue"]?.ToString();
+                    if(!string.Equals(label,verifiedDisplayName,StringComparison.OrdinalIgnoreCase))continue;
+                    var id=reference["id"]?.ToString();
+                    if(string.IsNullOrWhiteSpace(id))continue;
+                    matches[id]=(reference["objectKey"]?.ToString() ?? "",label ?? "");
+                }
+            }
+        }
+        if(matches.Count!=1)return [];
+        var item=matches.Single();
+        return new[]{item.Key,item.Value.Key,item.Value.Label}
+            .Where(x=>!string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
     internal static bool Matches(JsonNode? obj,string ownerAttributeId,IEnumerable<string> aliases) {
         if(obj is null || string.IsNullOrWhiteSpace(ownerAttributeId))return false;
         if(obj["attributes"] is not JsonArray attrs)return false;
