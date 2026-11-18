@@ -356,6 +356,8 @@ List<(string Email, string Source)> OwnerEmailCandidates(ClaimsPrincipal user) {
 // Match the authenticated AD identity to Jira's canonical user directory,
 // following MC-SIRK's /rest/api/3/users/search pagination contract.
 // Display names are accepted only when unique within the complete Jira directory.
+var jiraIdentityCache=new System.Collections.Concurrent.ConcurrentDictionary<string,
+    (DateTimeOffset Expires,string[] Aliases)>(StringComparer.OrdinalIgnoreCase);
 async Task<string[]> JiraIdentityAliasesForEmails(IEnumerable<string> emails, string? adDisplayName, CancellationToken cancellationToken) {
     var site = Setting("SiteUrl", "Jira:SiteUrl");
     if (!Uri.TryCreate(site, UriKind.Absolute, out var baseUri) ||
@@ -366,6 +368,10 @@ async Task<string[]> JiraIdentityAliasesForEmails(IEnumerable<string> emails, st
     var wanted = emails.Where(x=>!string.IsNullOrWhiteSpace(x))
         .ToHashSet(StringComparer.OrdinalIgnoreCase);
     if(wanted.Count==0)return [];
+    var cacheKey=string.Join("|",site,adDisplayName??"",
+        string.Join(";",wanted.OrderBy(x=>x,StringComparer.OrdinalIgnoreCase)));
+    if(jiraIdentityCache.TryGetValue(cacheKey,out var cached) &&
+       cached.Expires>DateTimeOffset.UtcNow)return cached.Aliases;
     var users = new List<(string Id,string Email,string Name)>();
     using var client = app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("jira");
     const int size=100;
@@ -408,7 +414,9 @@ async Task<string[]> JiraIdentityAliasesForEmails(IEnumerable<string> emails, st
                  .Select(x=>x.Id).Distinct(StringComparer.Ordinal).Count()==1)
             aliases.Add(user.Name);
     }
-    return aliases.ToArray();
+    var resolved=aliases.ToArray();
+    jiraIdentityCache[cacheKey]=(DateTimeOffset.UtcNow.AddMinutes(5),resolved);
+    return resolved;
 }
 
 // Shared AQL snapshots are backend-only. User authorization and ownership checks
@@ -545,7 +553,7 @@ async Task<List<JsonNode>> FetchAssetsFromJira(string aql) {
 
 // Every candidate must originate from the authenticated Windows account.
 // Never perform a tenant-wide fallback that could leak other employees' assets.
-async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Matches)> QueryMyAssets(ClaimsPrincipal user) {
+async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Matches)> QueryMyAssets(ClaimsPrincipal user, bool refresh = false) {
     var identity=user.Identity?.Name??throw new InvalidOperationException("Windows identity unavailable");
     var emails=OwnerEmailCandidates(user);
     string? adDisplayName=null;
@@ -577,7 +585,7 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
         // Legacy behavior restored: query configured AQL (ALL pages) and filter
         // the specified owner attribute on the server, never in the browser.
         // This retains SAMAccountName / DOMAIN\sam mappings stored by Jira.
-        var scope=await QueryAssets(equipmentAql);
+        var scope=await QueryAssets(equipmentAql,refresh);
         if(verifiedJiraIdentity && !string.IsNullOrWhiteSpace(adDisplayName)) {
             foreach(var alias in JiraAssetOwnership.UniqueReferencedOwnerAliases(
                 scope,ownerAttributeId,adDisplayName))aliases.Add(alias);
@@ -597,7 +605,7 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
     // email query must not hide the working result.
     foreach(var candidate in emails) {
         try {
-            var owned=await QueryAssets(OwnerAqlForEmail(candidate.Email));
+            var owned=await QueryAssets(OwnerAqlForEmail(candidate.Email),refresh);
             foreach(var obj in owned) {
                 var id=obj["id"]?.ToString();
                 if(!string.IsNullOrWhiteSpace(id))rows.TryAdd(id,obj);
@@ -1514,7 +1522,7 @@ app.MapGet("/api/assets", async (HttpContext ctx) => {
         if (string.IsNullOrWhiteSpace(ownerId)) return Results.Problem("Configure Jira OwnerAttributeId", statusCode: 503);
         // Jira reference owner values are not Windows logins. Use Jira's
         // validated Email Address reference query, like the working build.
-        var (entries, _) = await QueryMyAssets(ctx.User);
+        var (entries, _) = await QueryMyAssets(ctx.User,ctx.Request.Query.ContainsKey("refresh"));
         return Results.Ok(entries.Select(o => ProjectObject(o!)));
     } catch (Exception ex) { app.Logger.LogError(ex, "Asset query failed"); return Results.Problem("Nie udalo sie pobrac danych Jira.", statusCode: 502); }
 });
