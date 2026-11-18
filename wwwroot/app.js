@@ -1,4 +1,19 @@
 let me, assets = [], selected, assetsLoaded = false;
+const navPending={reviews:null,custody:null};
+function setGroupPending(badgeId,count,description){
+  const badge=$(badgeId);
+  if(!badge)return;
+  const valid=Number.isSafeInteger(count)&&count>=0;
+  badge.hidden=!valid;
+  badge.classList.toggle('pending',valid&&count>0);
+  badge.classList.toggle('clear',valid&&count===0);
+  if(valid){badge.textContent=String(count);badge.setAttribute('aria-label',count===0?'Brak spraw do obsługi':count+' '+description);}
+}
+function updateReviewGroupBadge(){
+  const counts=Object.values(navPending);
+  setGroupPending('reviewsPendingBadge',counts.every(Number.isSafeInteger)?counts.reduce((sum,n)=>sum+n,0):null,'przeglądów lub odbiorów do wykonania');
+}
+
 const appBase = new URL('.', document.querySelector('script[src^="app.js"]').src);
 const $ = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -190,6 +205,7 @@ function hideProtectedViews() {
   for(const item of ['assets','team','delegations','handover','permissions','teamPermissions','teamReviews','reviews','custodyInbox','reports','admin','settings','notificationSettings','deployment','audit','entra','access']) $(item+'View').hidden=true;
   $('adminNav').hidden=$('settingsGroup').hidden=$('administrationGroup').hidden=true;
   $('administrationPendingBadge').hidden=true;
+  navPending.reviews=null;navPending.custody=null;updateReviewGroupBadge();
   $('handoverNav').hidden=true;
   $('entitlementAdminNav').hidden=true;
   $('delegationsNav').hidden=true;
