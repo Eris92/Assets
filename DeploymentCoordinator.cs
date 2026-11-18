@@ -11,6 +11,16 @@ internal sealed class DeploymentCoordinator {
         Directory.CreateDirectory(queueDir);
     }
     private string FileAt(string name) => Path.Combine(queueDir, name);
+    private bool WorkerAlive() {
+        if (!File.Exists(FileAt("enabled.flag"))) return false;
+        try {
+            var heartbeat = JsonNode.Parse(File.ReadAllText(FileAt("heartbeat.json")));
+            var timestamp = heartbeat?["updatedAtUtc"]?.ToString();
+            return DateTimeOffset.TryParse(timestamp, out var updated) &&
+                updated <= DateTimeOffset.UtcNow.AddMinutes(1) &&
+                updated > DateTimeOffset.UtcNow.AddMinutes(-4);
+        } catch (Exception) { return false; }
+    }
     internal object Status() {
         JsonNode? last = null;
         var statusPath = FileAt("status.json");
@@ -23,7 +33,10 @@ internal sealed class DeploymentCoordinator {
         var active = Path.GetFileName(contentRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         var commit = active.Length == 40 && active.All(Uri.IsHexDigit) ? active : "local";
         return new {
-            enabled = File.Exists(FileAt("enabled.flag")),
+            installed = File.Exists(FileAt("enabled.flag")),
+            enabled = WorkerAlive(),
+            workerMessage = !File.Exists(FileAt("enabled.flag")) ? "Worker not installed. Run scripts/Install-DeploymentTask.ps1 elevated." :
+                WorkerAlive() ? "Worker is responding." : "Worker is installed but not responding. Check Scheduled Task AssetsWeb-Production-Updates.",
             currentVersion = commit,
             busy = File.Exists(FileAt("pending.json")) || File.Exists(FileAt("processing.json")),
             last
@@ -31,7 +44,7 @@ internal sealed class DeploymentCoordinator {
     }
     internal (bool Accepted, string Message, string? RequestId) Enqueue(string action, string actor) {
         if (action is not ("update" or "rollback")) return (false, "Invalid deployment action", null);
-        if (!File.Exists(FileAt("enabled.flag"))) return (false, "Deployment worker is not installed", null);
+        if (!WorkerAlive()) return (false, "Deployment worker is missing or inactive; check scheduled task AssetsWeb-Production-Updates.", null);
         if (File.Exists(FileAt("pending.json")) || File.Exists(FileAt("processing.json")))
             return (false, "Another deployment is already queued or running", null);
         var requestId = Guid.NewGuid().ToString("D");
