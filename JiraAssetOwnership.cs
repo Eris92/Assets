@@ -30,7 +30,7 @@ internal static class JiraAssetOwnership {
         if(allowed.Count==0)return false;
         foreach(var owner in ownerAttributes)
         foreach(var value in owner?["objectAttributeValues"] as JsonArray ?? new JsonArray()) {
-            foreach(var candidate in Strings(value)) {
+            foreach(var candidate in Strings(value).Concat(ReferenceIdentityStrings(value?["referencedObject"]))) {
                 // Preserve old assets-portal behavior: Jira displayValue can
                 // contain a comma-separated list of assigned Windows logins.
                 if(candidate.Split(',',StringSplitOptions.TrimEntries|
@@ -39,6 +39,23 @@ internal static class JiraAssetOwnership {
             }
         }
         return false;
+    }
+    // MC-SIRK traverses referencedObject.attributes. Restrict this to
+    // explicit identity fields to avoid matching unrelated notes or serials.
+    private static IEnumerable<string> ReferenceIdentityStrings(JsonNode? reference) {
+        if(reference?["attributes"] is not JsonArray attrs)yield break;
+        var identityNames=new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+            "Email Address","Email","E-mail","emailAddress","accountId",
+            "User Name","Username","Login","SAMAccountName","Display Name"
+        };
+        foreach(var attribute in attrs) {
+            var name=attribute?["objectTypeAttribute"]?["name"]?.ToString() ??
+                attribute?["name"]?.ToString();
+            if(name is null || !identityNames.Contains(name))continue;
+            foreach(var value in attribute?["objectAttributeValues"] as JsonArray ?? new JsonArray()) {
+                foreach(var text in Strings(value))yield return text;
+            }
+        }
     }
     private static IEnumerable<string> Strings(JsonNode? node,int depth=0) {
         if(node is null||depth>6)yield break;
