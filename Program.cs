@@ -242,7 +242,7 @@ async Task<JsonNode> Jira(HttpMethod method, string path, object? body = null) {
 string AttributeValue(JsonNode? attribute) => JiraAssetWorkflow.AttributeText(attribute);
 JsonNode? Attribute(JsonNode obj, string id) => obj["attributes"]?.AsArray().FirstOrDefault(a => a?["objectTypeAttributeId"]?.ToString() == id);
 object ProjectObject(JsonNode obj) => new {
-    id = obj["id"]?.ToString(), key = obj["objectKey"]?.ToString(), name = obj["name"]?.ToString(), type = obj["objectType"]?["name"]?.ToString(),
+    id = obj["id"]?.ToString(), key = obj["objectKey"]?.ToString(), name = obj["name"]?.ToString() ?? obj["label"]?.ToString(), type = obj["objectType"]?["name"]?.ToString(),
     attributes = (obj["attributes"]?.AsArray() ?? new JsonArray()).Select(a => new {
         id = a?["objectTypeAttributeId"]?.ToString(),
         name = a?["objectTypeAttribute"]?["name"]?.ToString() ?? a?["objectTypeAttributeId"]?.ToString(),
@@ -415,6 +415,8 @@ async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
     var aql = aqlOverride ?? Setting("Aql", "Jira:Aql");
     if (string.IsNullOrWhiteSpace(aql)) throw new InvalidOperationException("Jira AQL is not configured");
     var entries = new List<JsonNode>();
+    // MC-SIRK resolves attribute names from each object type when AQL omits them.
+    var typeAttributeNames = new Dictionary<string,Dictionary<string,string>>(StringComparer.Ordinal);
     for (var page = 1; page <= 100; page++) {
         const int pageSize = 500;
         var result = await Jira(HttpMethod.Post, $"object/aql?startAt={entries.Count}&maxResults={pageSize}&includeAttributes=true", new { qlQuery = aql });
@@ -436,6 +438,46 @@ async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
                     }
                     definition["name"] = name;
                 }
+            }
+        }
+        // Resolve missing attribute names before matching Osoba_odpowiedzialna.
+        // Only metadata is fetched; ownership remains checked by exact user identity.
+        var missingTypes = batch.OfType<JsonNode>()
+            .Where(o => o["attributes"] is JsonArray attributes &&
+                attributes.Any(a => a?["objectTypeAttribute"]?["name"] is null))
+            .Select(o => o["objectType"]?["id"]?.ToString())
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal).ToArray();
+        foreach(var typeId in missingTypes) {
+            if(typeAttributeNames.ContainsKey(typeId!))continue;
+            var names = new Dictionary<string,string>(StringComparer.Ordinal);
+            try {
+                var defs = await Jira(HttpMethod.Get, "objecttype/"+Uri.EscapeDataString(typeId!)+"/attributes");
+                if(defs is JsonArray definitions) {
+                    foreach(var definition in definitions) {
+                        var id=definition?["id"]?.ToString();
+                        var name=definition?["name"]?.ToString();
+                        if(!string.IsNullOrWhiteSpace(id)&&!string.IsNullOrWhiteSpace(name))
+                            names[id]=name;
+                    }
+                }
+            } catch(Exception ex) {
+                app.Logger.LogWarning(ex,"Jira object type attribute metadata unavailable for {TypeId}",typeId);
+            }
+            typeAttributeNames[typeId!]=names;
+        }
+        foreach(var obj in batch.OfType<JsonNode>()) {
+            var typeId=obj["objectType"]?["id"]?.ToString();
+            if(typeId is null||!typeAttributeNames.TryGetValue(typeId,out var names))continue;
+            foreach(var attr in obj["attributes"] as JsonArray ?? new JsonArray()) {
+                if(attr is not JsonObject attribute)continue;
+                var id=attr["objectTypeAttributeId"]?.ToString();
+                if(id is null||!names.TryGetValue(id,out var name))continue;
+                if(attribute["objectTypeAttribute"] is not JsonObject definition) {
+                    definition=new JsonObject();
+                    attribute["objectTypeAttribute"]=definition;
+                }
+                definition["name"]=name;
             }
         }
         entries.AddRange(batch.OfType<JsonNode>().Select(x => x.DeepClone()));
