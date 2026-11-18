@@ -67,3 +67,22 @@ var unrelatedReference=JsonNode.Parse("""
 """)!;
 Check(!JiraAssetOwnership.Matches(unrelatedReference,"202",userScope),
  "Referenced object's unrelated attributes must not leak another owner's asset");
+
+var ownerWithNestedEmail=JsonNode.Parse("""
+{"id":"9","attributes":[{"objectTypeAttributeId":"301",
+ "objectTypeAttribute":{"name":"Osoba_odpowiedzialna"},
+ "objectAttributeValues":[{"referencedObject":{"id":"888","label":"Employee record",
+ "attributes":[{"objectTypeAttribute":{"name":"Email Address"},
+ "objectAttributeValues":[{"displayValue":"user@example.com"}]}]}}]}]}
+""")!;
+Check(JiraAssetOwnership.Matches(ownerWithNestedEmail,"202",userScope),
+    "Referenced owner's named email identity must match");
+var unrelatedNestedAttribute=JsonNode.Parse("""
+{"id":"10","attributes":[{"objectTypeAttributeId":"301",
+ "objectTypeAttribute":{"name":"Osoba_odpowiedzialna"},
+ "objectAttributeValues":[{"referencedObject":{"id":"889","label":"Employee record",
+ "attributes":[{"objectTypeAttribute":{"name":"Description"},
+ "objectAttributeValues":[{"displayValue":"user@example.com"}]}]}}]}]}
+""")!;
+Check(!JiraAssetOwnership.Matches(unrelatedNestedAttribute,"202",userScope),
+    "Unrelated nested reference attributes must never authorize access");
