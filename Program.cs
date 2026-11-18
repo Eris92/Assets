@@ -453,8 +453,8 @@ async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
             var names = new Dictionary<string,string>(StringComparer.Ordinal);
             try {
                 var defs = await Jira(HttpMethod.Get, "objecttype/"+Uri.EscapeDataString(typeId!)+"/attributes");
-                if(defs is JsonArray definitions) {
-                    foreach(var definition in definitions) {
+                if(defs is JsonArray attributeDefinitions) {
+                    foreach(var definition in attributeDefinitions) {
                         var id=definition?["id"]?.ToString();
                         var name=definition?["name"]?.ToString();
                         if(!string.IsNullOrWhiteSpace(id)&&!string.IsNullOrWhiteSpace(name))
