@@ -1560,7 +1560,8 @@ app.MapGet("/api/team", async (HttpContext ctx) => {
                     app.Logger.LogWarning(ex,"AD mail resolution unavailable for scoped team entry");
                 }
                 var aliases = JiraAssetOwnership.Aliases(person.Login,
-                    ad is null ? Array.Empty<string>() : new[]{ad.Email});
+                    ad is null ? Array.Empty<string>() : new[]{ad.Email})
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var objects = new Dictionary<string,JsonNode>(StringComparer.Ordinal);
                 foreach(var obj in scoped.Where(o=>JiraAssetOwnership.Matches(o,ownerId!,aliases))) {
                     var id=obj["id"]?.ToString();
