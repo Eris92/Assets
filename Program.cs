@@ -361,7 +361,7 @@ async Task<string[]> JiraIdentityAliasesForEmails(IEnumerable<string> emails, st
     if (!Uri.TryCreate(site, UriKind.Absolute, out var baseUri) ||
         baseUri.Scheme != Uri.UriSchemeHttps || !baseUri.IsDefaultPort ||
         !baseUri.Host.EndsWith(".atlassian.net", StringComparison.OrdinalIgnoreCase) ||
-        baseUri.AbsolutePath != "/")
+        baseUri.AbsolutePath != "/" && baseUri.AbsolutePath != "")
         throw new InvalidOperationException("Valid Jira site URL is required for user identity lookup");
     var wanted = emails.Where(x=>!string.IsNullOrWhiteSpace(x))
         .ToHashSet(StringComparer.OrdinalIgnoreCase);
