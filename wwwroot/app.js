@@ -21,21 +21,25 @@ function view(name) {
   if ((name === 'access' || name === 'admin' || name === 'settings' || name === 'deployment' || name === 'audit' || name === 'notificationSettings' || name === 'entitlementAdmin' || name === 'entra') && !me?.admin) return;
   if(name === 'handover' && !me?.handover) return;
   if((name==='team'||name==='teamPermissions'||name==='teamReviews'||name==='delegations')&&!me?.manager)return;
-  for (const item of ['assets','team','delegations','handover','permissions','teamPermissions','teamReviews','reviews','custodyInbox','reports','admin','settings','notificationSettings','entitlementAdmin','deployment','audit','entra','access']) $(item+'View').hidden = item !== name;
+  for (const item of ['dashboard','assets','team','delegations','handover','permissions','teamPermissions','teamReviews','reviews','custodyInbox','reports','admin','settings','notificationSettings','entitlementAdmin','deployment','audit','entra','access']) $(item+'View').hidden = item !== name;
   document.querySelectorAll('nav button[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === name));
-  const equipmentView = name === 'assets' || name === 'team';
-  $('equipmentNav').classList.toggle('active', equipmentView);
-  if (equipmentView) { $('equipmentSubnav').hidden = false; $('equipmentNav').setAttribute('aria-expanded', 'true'); }
-  const permissionsView = name === 'permissions' || name === 'teamPermissions';
-  $('permissionsNav').classList.toggle('active', permissionsView);
-  if (permissionsView) { $('permissionsSubnav').hidden = false; $('permissionsNav').setAttribute('aria-expanded','true'); }
-  const managementView = name === 'teamReviews' || name === 'delegations';
-  $('managementNav').classList.toggle('active', managementView);
-  if (managementView) { $('managementSubnav').hidden = false; $('managementNav').setAttribute('aria-expanded','true'); }
-  const settingsView = name === 'settings' || name === 'notificationSettings' || name === 'entitlementAdmin' || name === 'deployment' || name === 'audit' || name === 'entra' || name === 'access';
-  $('settingsNav').classList.toggle('active', settingsView);
-  if (settingsView) { $('settingsSubnav').hidden = false; $('settingsNav').setAttribute('aria-expanded','true'); }
-  message(''); if (name === 'team') loadTeam(); if(name==='delegations')loadDelegations(); if(name==='teamReviews')loadTeamReviewStatus(); if(name==='reviews')loadAnnualReviews(); if(name==='custodyInbox')loadCustodyInbox(); if(name==='notificationSettings')loadNotificationSettings(); if(name==='entitlementAdmin')loadEntitlementAdmin(); if(name==='permissions') loadMyPermissions(); if(name==='teamPermissions') loadTeamPermissions(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'handover' && typeof loadHandover === 'function') loadHandover(); if (name === 'settings') loadSettings(); if (name === 'deployment') loadDeployment(); if (name === 'audit') loadAudit(); if (name === 'access') loadAccess();
+  const groups = {
+    equipment: ['assets','team'],
+    permissions: ['permissions','teamPermissions'],
+    reviewsGroup: ['reviews','custodyInbox'],
+    management: ['teamReviews','delegations'],
+    administration: ['admin','handover'],
+    settings: ['settings','notificationSettings','entitlementAdmin','deployment','audit','entra','access']
+  };
+  for (const [key, views] of Object.entries(groups)) {
+    const active=views.includes(name);
+    $(key+'Nav').classList.toggle('active', active);
+    if (active) {
+      $(key+'Subnav').hidden=false;
+      $(key+'Nav').setAttribute('aria-expanded','true');
+    }
+  }
+  message(''); if(name==='dashboard')loadDashboard(); if (name === 'team') loadTeam(); if(name==='delegations')loadDelegations(); if(name==='teamReviews')loadTeamReviewStatus(); if(name==='reviews')loadAnnualReviews(); if(name==='custodyInbox')loadCustodyInbox(); if(name==='notificationSettings')loadNotificationSettings(); if(name==='entitlementAdmin')loadEntitlementAdmin(); if(name==='permissions') loadMyPermissions(); if(name==='teamPermissions') loadTeamPermissions(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'handover' && typeof loadHandover === 'function') loadHandover(); if (name === 'settings') loadSettings(); if (name === 'deployment') loadDeployment(); if (name === 'audit') loadAudit(); if (name === 'access') loadAccess();
 }
 async function loadSettings() {
   try {
@@ -112,26 +116,13 @@ async function loadReports() {
     if (me.admin) { $('adminReports').innerHTML = rows.map(r => reportRow(r,true)).join('') || '<p class="empty">Brak zgłoszeń.</p>'; const count = rows.filter(r => r.status === 'Pending' || r.status === 'NeedsRegistration' || r.status === 'NeedsAccessReview').length; $('pendingCount').textContent = String(count); }
   } catch(e) { message(e.message,true); }
 }
-$('permissionsNav').addEventListener('click', () => {
-  const submenu = $('permissionsSubnav');
-  submenu.hidden = !submenu.hidden;
-  $('permissionsNav').setAttribute('aria-expanded', String(!submenu.hidden));
-});
-$('managementNav').addEventListener('click', () => {
-  const submenu=$('managementSubnav');
-  submenu.hidden=!submenu.hidden;
-  $('managementNav').setAttribute('aria-expanded',String(!submenu.hidden));
-});
-$('settingsNav').addEventListener('click', () => {
-  const submenu = $('settingsSubnav');
-  submenu.hidden = !submenu.hidden;
-  $('settingsNav').setAttribute('aria-expanded', String(!submenu.hidden));
-});
-$('equipmentNav').addEventListener('click', () => {
-  const submenu = $('equipmentSubnav');
-  submenu.hidden = !submenu.hidden;
-  $('equipmentNav').setAttribute('aria-expanded', String(!submenu.hidden));
-});
+for (const id of ['equipment','permissions','reviewsGroup','management','administration','settings']) {
+  $(id+'Nav').addEventListener('click',()=>{
+    const sub=$(id+'Subnav');
+    sub.hidden=!sub.hidden;
+    $(id+'Nav').setAttribute('aria-expanded',String(!sub.hidden));
+  });
+}
 document.querySelector('nav').addEventListener('click', e => { const b = e.target.closest('button[data-view]'); if (b) view(b.dataset.view); });
 function openEquipmentReport(asset, owner = '') {
   selected = asset;
@@ -188,7 +179,7 @@ $('discoverWorkspace').onclick = async () => {
 setupEquipmentFilters('asset','assetFilters',renderPersonalEquipment);
 function hideProtectedViews() {
   for(const item of ['assets','team','delegations','handover','permissions','teamPermissions','teamReviews','reviews','custodyInbox','reports','admin','settings','notificationSettings','deployment','audit','entra','access']) $(item+'View').hidden=true;
-  $('adminNav').hidden=$('settingsGroup').hidden=true;
+  $('adminNav').hidden=$('settingsGroup').hidden=$('administrationGroup').hidden=true;
   $('handoverNav').hidden=true;
   $('entitlementAdminNav').hidden=true;
   $('delegationsNav').hidden=true;
@@ -217,7 +208,9 @@ async function signIn() {
     document.querySelector('button[data-view="teamPermissions"]').hidden=!me.manager;
     $('handoverNav').hidden=!me.handover;
     $('adminNav').hidden=$('settingsGroup').hidden=!me.admin;
-    view('assets');
+    $('administrationGroup').hidden=!(me.admin||me.handover);
+    $('overviewAdminTile').hidden=!me.admin;
+    view('dashboard');
     await Promise.all([loadAssets(),loadReports(),loadAnnualReviews(),loadCustodyInbox(true)]);
   } catch(e) {
     me=null;
@@ -377,4 +370,36 @@ $('discoveredForm').addEventListener('submit', async e => {
   } finally {
     button.disabled = false;
   }
+});
+
+async function loadDashboard(){
+  if(!me?.allowed)return;
+  $('overviewError').textContent='';
+  for(const id of ['overviewMyReports','overviewReviews','overviewCustody','overviewAdminReports'])$(id).textContent='—';
+  const pending=new Set(['Pending','NeedsRegistration','NeedsAccessReview']);
+  const requests=[
+    {url:'/api/reports',run:rows=>{
+      const mine=rows.filter(r=>String(r.reporter||'').toLowerCase()===me.name.toLowerCase());
+      $('overviewMyReports').textContent=mine.filter(r=>pending.has(r.status)).length;
+      if(me.admin)$('overviewAdminReports').textContent=rows.filter(r=>pending.has(r.status)).length;
+    }},
+    {url:'/api/reviews/mine',run:rows=>{
+      const year=new Date().getUTCFullYear();
+      $('overviewReviews').textContent=rows.filter(r=>r.year===year&&r.status!=='Confirmed').length;
+    }},
+    {url:'/api/handover/inbox',run:rows=>{
+      const items=Array.isArray(rows)?rows:Array.isArray(rows?.items)?rows.items:Array.isArray(rows?.inbox)?rows.inbox:null;
+      if(items)$('overviewCustody').textContent=items.filter(r=>['PendingDispatch','PendingReceipt'].includes(r.status)).length;
+      else $('overviewError').textContent='Status odbiorow jest niedostepny w tym formacie API.';
+    }}
+  ];
+  await Promise.all(requests.map(async item=>{
+    try{item.run(await api(item.url));}
+    catch(error){$('overviewError').textContent+=' '+error.message;}
+  }));
+}
+$('dashboardRefresh').addEventListener('click',loadDashboard);
+$('dashboardView').addEventListener('click',e=>{
+  const target=e.target.closest('[data-go]')?.dataset.go;
+  if(target)view(target);
 });
