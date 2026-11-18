@@ -86,3 +86,30 @@ var unrelatedNestedAttribute=JsonNode.Parse("""
 """)!;
 Check(!JiraAssetOwnership.Matches(unrelatedNestedAttribute,"202",userScope),
     "Unrelated nested reference attributes must never authorize access");
+
+var knownCMDBOwner=JsonNode.Parse("""
+{"id":"500","objectKey":"TEST-500","attributes":[
+ {"objectTypeAttributeId":"616","objectTypeAttribute":{"name":"Osoba_odpowiedzialna"},
+ "objectAttributeValues":[{"searchValue":"CMDB-14145",
+ "displayValue":"Krzysztof Lechmyc","referencedObject":{
+ "id":"14145","objectKey":"CMDB-14145","label":"Krzysztof Lechmyc",
+ "objectType":{"name":"Users"}}}]}]}
+""")!;
+var verifiedAliases=JiraAssetOwnership.UniqueReferencedOwnerAliases(
+    [knownCMDBOwner],"616","Krzysztof Lechmyc");
+Check(verifiedAliases.Contains("CMDB-14145"),"Unique Users reference key should resolve");
+Check(JiraAssetOwnership.Matches(knownCMDBOwner,"616",verifiedAliases),
+    "CMDB Users reference should authorize the matched asset");
+Check(JiraAssetOwnership.UniqueReferencedOwnerAliases(
+    [knownCMDBOwner],"616","Other User").Length==0,
+    "Unrelated AD user must not resolve the owner reference");
+var duplicatedCMDBOwner=JsonNode.Parse("""
+{"id":"501","attributes":[{"objectTypeAttributeId":"635",
+ "objectTypeAttribute":{"name":"Osoba_odpowiedzialna"},
+ "objectAttributeValues":[{"displayValue":"Krzysztof Lechmyc",
+ "referencedObject":{"id":"99999","objectKey":"CMDB-99999",
+ "label":"Krzysztof Lechmyc","objectType":{"name":"Users"}}}]}]}
+""")!;
+Check(JiraAssetOwnership.UniqueReferencedOwnerAliases(
+    [knownCMDBOwner,duplicatedCMDBOwner],"616","Krzysztof Lechmyc").Length==0,
+    "Duplicate Users objects with identical display names must fail closed");
