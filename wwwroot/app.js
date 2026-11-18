@@ -26,9 +26,12 @@ function view(name) {
   const equipmentView = name === 'assets' || name === 'team';
   $('equipmentNav').classList.toggle('active', equipmentView);
   if (equipmentView) { $('equipmentSubnav').hidden = false; $('equipmentNav').setAttribute('aria-expanded', 'true'); }
-  const permissionsView = name === 'permissions' || name === 'teamPermissions' || name === 'teamReviews';
+  const permissionsView = name === 'permissions' || name === 'teamPermissions';
   $('permissionsNav').classList.toggle('active', permissionsView);
   if (permissionsView) { $('permissionsSubnav').hidden = false; $('permissionsNav').setAttribute('aria-expanded','true'); }
+  const managementView = name === 'teamReviews' || name === 'delegations';
+  $('managementNav').classList.toggle('active', managementView);
+  if (managementView) { $('managementSubnav').hidden = false; $('managementNav').setAttribute('aria-expanded','true'); }
   const settingsView = name === 'settings' || name === 'notificationSettings' || name === 'entitlementAdmin' || name === 'deployment' || name === 'audit' || name === 'entra' || name === 'access';
   $('settingsNav').classList.toggle('active', settingsView);
   if (settingsView) { $('settingsSubnav').hidden = false; $('settingsNav').setAttribute('aria-expanded','true'); }
@@ -114,6 +117,11 @@ $('permissionsNav').addEventListener('click', () => {
   submenu.hidden = !submenu.hidden;
   $('permissionsNav').setAttribute('aria-expanded', String(!submenu.hidden));
 });
+$('managementNav').addEventListener('click', () => {
+  const submenu=$('managementSubnav');
+  submenu.hidden=!submenu.hidden;
+  $('managementNav').setAttribute('aria-expanded',String(!submenu.hidden));
+});
 $('settingsNav').addEventListener('click', () => {
   const submenu = $('settingsSubnav');
   submenu.hidden = !submenu.hidden;
@@ -184,6 +192,8 @@ function hideProtectedViews() {
   $('handoverNav').hidden=true;
   $('entitlementAdminNav').hidden=true;
   $('delegationsNav').hidden=true;
+  $('teamReviewsNav').hidden=true;
+  $('managementGroup').hidden=true;
 }
 async function signIn() {
   $('authPanel').hidden=true;
@@ -202,6 +212,7 @@ async function signIn() {
     $('teamNav').hidden=!me.manager;
     $('entitlementAdminNav').hidden=!me.admin;
     $('delegationsNav').hidden=!me.manager;
+    $('managementGroup').hidden=!me.manager;
     $('teamReviewsNav').hidden=!me.manager;
     document.querySelector('button[data-view="teamPermissions"]').hidden=!me.manager;
     $('handoverNav').hidden=!me.handover;
