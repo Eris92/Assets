@@ -81,8 +81,10 @@ async function loadCustodyInbox(silent=false){
   custodyRows=inbox||[];custodyManagerRows=pending||[];
   const badge=$('custodyPendingIndicator');
   if(badge)badge.textContent=custodyRows.length?' ('+custodyRows.length+')':'';
+  navPending.custody=custodyRows.filter(row=>['PendingDispatch','PendingReceipt'].includes(row.status)).length;updateReviewGroupBadge();
   if(!silent||!$('custodyInboxView').hidden)renderCustodyInbox();
  }catch(err){
+  navPending.custody=null;updateReviewGroupBadge();
   if(!silent&&$('custodyInboxRows'))$('custodyInboxRows').textContent=err.message;
  }
 }
