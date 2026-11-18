@@ -7,6 +7,16 @@ $queue = Join-Path $env:ProgramData 'Assets\Data\deployment-queue'
 $pending = Join-Path $queue 'pending.json'
 $processing = Join-Path $queue 'processing.json'
 $statusPath = Join-Path $queue 'status.json'
+# Heartbeat is refreshed even without a queued request. The portal uses it
+# to distinguish an installed worker from a working scheduled task.
+$heartbeat = Join-Path $queue 'heartbeat.json'
+$heartbeatTemp = $heartbeat + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+$heartbeatJson = ConvertTo-Json -Compress -InputObject @{
+    schema = 1
+    updatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+}
+[IO.File]::WriteAllText($heartbeatTemp, $heartbeatJson, (New-Object Text.UTF8Encoding($false)))
+Move-Item -LiteralPath $heartbeatTemp -Destination $heartbeat -Force -ErrorAction Stop
 if (-not (Test-Path -LiteralPath $pending -PathType Leaf)) { return }
 if (-not (Get-ScheduledTask -TaskName 'AssetsWeb-Production-Updates' -ErrorAction SilentlyContinue)) {
     throw 'Authorized scheduled task is missing.'
