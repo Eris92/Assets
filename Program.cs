@@ -415,6 +415,17 @@ async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
     var aql = aqlOverride ?? Setting("Aql", "Jira:Aql");
     if (string.IsNullOrWhiteSpace(aql)) throw new InvalidOperationException("Jira AQL is not configured");
     var entries = new List<JsonNode>();
+    // Jira may cap totalFilterCount. Use the authoritative count endpoint
+    // as MC-SIRK does, and do not silently report partial inventory as complete.
+    int? authoritativeTotal=null;
+    try {
+        var totalResponse=await Jira(HttpMethod.Post,"object/aql/totalcount",new {qlQuery=aql});
+        if(int.TryParse(totalResponse["totalCount"]?.ToString(),out var totalCount) && totalCount>=0)
+            authoritativeTotal=totalCount;
+    } catch(Exception ex) {
+        app.Logger.LogWarning(ex,"Jira AQL totalcount unavailable; use bounded page scan");
+    }
+    var seenIds=new HashSet<string>(StringComparer.Ordinal);
     // MC-SIRK resolves attribute names from each object type when AQL omits them.
     var typeAttributeNames = new Dictionary<string,Dictionary<string,string>>(StringComparer.Ordinal);
     for (var page = 1; page <= 100; page++) {
@@ -480,8 +491,27 @@ async Task<List<JsonNode>> QueryAssets(string? aqlOverride = null) {
                 definition["name"]=name;
             }
         }
-        entries.AddRange(batch.OfType<JsonNode>().Select(x => x.DeepClone()));
-        if (!JiraAssetWorkflow.HasMore(result, entries.Count - batch.Count, batch.Count, pageSize)) return entries;
+        if(batch.Count==0) {
+            if(authoritativeTotal.HasValue && entries.Count<authoritativeTotal.Value)
+                throw new InvalidOperationException("Jira AQL returned an empty page before the authoritative total");
+            return entries;
+        }
+        var offset=entries.Count;
+        foreach(var obj in batch.OfType<JsonNode>()) {
+            var id=obj["id"]?.ToString() ?? obj["objectKey"]?.ToString();
+            if(string.IsNullOrWhiteSpace(id) || !seenIds.Add(id))
+                throw new InvalidOperationException("Jira AQL pagination returned duplicate or missing asset ID");
+            entries.Add(obj.DeepClone());
+        }
+        if(authoritativeTotal.HasValue) {
+            if(entries.Count>=authoritativeTotal.Value)return entries;
+        } else {
+            // A full page requires a probe even if Jira reports a capped or
+            // inconsistent totalFilterCount. Never return a truncated inventory.
+            if(batch.Count<pageSize) {
+                if(!JiraAssetWorkflow.HasMore(result,offset,batch.Count,pageSize))return entries;
+            }
+        }
     }
     throw new InvalidOperationException("Asset query limit reached; narrow the configured AQL");
 }
