@@ -186,9 +186,9 @@ nav>.equipmentGroup{min-width:0;}
 .overviewGrid span{font-weight:600;font-size:14px;}
 
 /* Collapsed administration section summary, sourced from existing report counts. */
-#administrationNav{display:flex;align-items:center;gap:8px;}
-#administrationNav .navChevron{margin-left:auto;}
-#administrationPendingBadge.navCounter{display:inline-flex;align-items:center;justify-content:center;flex:none;min-width:22px;height:22px;padding:2px 7px;border-radius:999px;font-size:12px;font-weight:750;line-height:1;color:#fff;}
-#administrationPendingBadge.navCounter[hidden]{display:none!important;}
-#administrationPendingBadge.pending{background:#d34d43;}
-#administrationPendingBadge.clear{background:#157f5b;}
+#administrationNav,#reviewsGroupNav{display:flex;align-items:center;gap:8px;}
+#administrationNav .navChevron,#reviewsGroupNav .navChevron{margin-left:auto;}
+.navCounter{display:inline-flex;align-items:center;justify-content:center;flex:none;min-width:22px;height:22px;padding:2px 7px;border-radius:999px;font-size:12px;font-weight:750;line-height:1;color:#fff;}
+.navCounter[hidden]{display:none!important;}
+.navCounter.pending{background:#d34d43;}
+.navCounter.clear{background:#157f5b;}
