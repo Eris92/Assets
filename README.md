@@ -51,6 +51,12 @@ Install the worker once from elevated Windows PowerShell:
 
     & 'C:\Sites\Assets\scripts\Install-DeploymentTask.ps1'
 
+Re-run the installer after updating the deployment worker scripts: IIS release
+swaps do not modify the protected worker copy under Program Files. The updater
+panel requires a worker heartbeat no older than four minutes before accepting
+new requests. Verify the scheduled task and pending/processing queue files
+before retrying any failed operation.
+
 The task runs as SYSTEM once per minute from a protected Program Files directory.
 It reads the fixed-schema request from ProgramData Assets and changes only Assets-KL.
 The app pool has no IIS admin rights. Failed executions are shown in the panel;
