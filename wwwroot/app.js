@@ -1,4 +1,4 @@
-let me, assets = [], selected;
+let me, assets = [], selected, assetsLoaded = false;
 const appBase = new URL('.', document.querySelector('script[src^="app.js"]').src);
 const $ = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -39,7 +39,7 @@ function view(name) {
       $(key+'Nav').setAttribute('aria-expanded','true');
     }
   }
-  message(''); if(name==='dashboard')loadDashboard(); if (name === 'team') loadTeam(); if(name==='delegations')loadDelegations(); if(name==='teamReviews')loadTeamReviewStatus(); if(name==='reviews')loadAnnualReviews(); if(name==='custodyInbox')loadCustodyInbox(); if(name==='notificationSettings')loadNotificationSettings(); if(name==='entitlementAdmin')loadEntitlementAdmin(); if(name==='permissions') loadMyPermissions(); if(name==='teamPermissions') loadTeamPermissions(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'handover' && typeof loadHandover === 'function') loadHandover(); if (name === 'settings') loadSettings(); if (name === 'deployment') loadDeployment(); if (name === 'audit') loadAudit(); if (name === 'access') loadAccess();
+  message(''); if(name==='dashboard')loadDashboard(); if(name==='assets')loadAssets(); if (name === 'team') loadTeam(); if(name==='delegations')loadDelegations(); if(name==='teamReviews')loadTeamReviewStatus(); if(name==='reviews')loadAnnualReviews(); if(name==='custodyInbox')loadCustodyInbox(); if(name==='notificationSettings')loadNotificationSettings(); if(name==='entitlementAdmin')loadEntitlementAdmin(); if(name==='permissions') loadMyPermissions(); if(name==='teamPermissions') loadTeamPermissions(); if (name === 'reports' || name === 'admin') loadReports(); if (name === 'handover' && typeof loadHandover === 'function') loadHandover(); if (name === 'settings') loadSettings(); if (name === 'deployment') loadDeployment(); if (name === 'audit') loadAudit(); if (name === 'access') loadAccess();
 }
 async function loadSettings() {
   try {
@@ -50,10 +50,12 @@ async function loadSettings() {
     $('tokenStatus').textContent = settings.tokenConfigured ? 'Token zapisany. Pozostaw puste, aby go zachować.' : 'Token nie jest zapisany.';
   } catch(e) { message(e.message, true); }
 }
-async function loadAssets() {
+async function loadAssets(force=false) {
+  if(assetsLoaded&&!force) {renderPersonalEquipment();return;}
   $('assets').innerHTML = '<p class="empty">Pobieranie zasobów…</p>';
   try {
-    assets = await api('/api/assets');
+    assets = await api(force?'/api/assets?refresh=1':'/api/assets');
+    assetsLoaded=true;
     renderPersonalEquipment();
     if (assets.length === 0) {
       $('assets').insertAdjacentHTML('afterbegin',
@@ -154,7 +156,7 @@ $('adminReports').addEventListener('click', async e => {
   const action = b.dataset.decision; if (!confirm(action === 'approve' ? 'Przyjąć zgłoszenie do oceny? Dla sprzętu spoza listy i uprawnień AD operacja tworzy zadanie ręcznej kontroli i nie zmienia danych źródłowych.' : 'Odrzucić zgłoszenie?')) return;
   b.disabled = true; try { await api(`/api/reports/${b.dataset.id}/decision`,{method:'POST',body:JSON.stringify({action})}); await loadReports(); await loadAssets(); await loadTeam(true); message('Decyzja została zapisana.'); } catch(err) { await loadReports(); message(err.message,true); b.disabled = false; }
 });
-$('refresh').onclick = loadAssets; $('refreshAdmin').onclick = loadReports;
+$('refresh').onclick = () => loadAssets(true); $('refreshAdmin').onclick = loadReports;
 $('teamRefresh').onclick=()=>loadTeam(true);
 $('settingsForm').addEventListener('submit', async e => {
   e.preventDefault();
@@ -211,7 +213,7 @@ async function signIn() {
     $('administrationGroup').hidden=!(me.admin||me.handover);
     $('overviewAdminTile').hidden=!me.admin;
     view('dashboard');
-    await Promise.all([loadAssets(),loadReports(),loadAnnualReviews(),loadCustodyInbox(true)]);
+    await Promise.all([loadReports(),loadAnnualReviews(),loadCustodyInbox(true)]);
   } catch(e) {
     me=null;
     $('authPanel').hidden=false;
