@@ -550,6 +550,67 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
     return (rows.Values.ToList(),matches.ToArray());
 }
 
+// Admin-only inventory mapping diagnostics. No raw foreign asset ownership data.
+app.MapGet("/api/admin/jira/ownership-diagnostics", async (HttpContext ctx) => {
+    if (!IsAdmin(ctx.User)) return AuthError(ctx);
+    try {
+        var login=ctx.User.Identity?.Name ?? throw new InvalidOperationException("Missing Windows identity");
+        var emails=OwnerEmailCandidates(ctx.User);
+        HandoverPerson? ad=null;
+        try { ad=HandoverDirectory.Resolve(login); }
+        catch(Exception ex) { app.Logger.LogWarning(ex,"Jira diagnostic AD lookup failed"); }
+        var aliases=JiraAssetOwnership.Aliases(login,emails.Select(e=>e.Email))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var jiraAliasCount=0;
+        string identityStatus;
+        try {
+            var jiraAliases=await JiraIdentityAliasesForEmails(
+                emails.Select(e=>e.Email),ad?.Name,ctx.RequestAborted);
+            jiraAliasCount=jiraAliases.Length;
+            foreach(var alias in jiraAliases) aliases.Add(alias);
+            identityStatus=jiraAliasCount>0 ? "resolved" : "not_found";
+        } catch(Exception ex) {
+            app.Logger.LogWarning(ex,"Jira diagnostic identity lookup failed");
+            identityStatus="failed: "+ex.GetType().Name;
+        }
+        var ownerId=Setting("OwnerAttributeId","Jira:OwnerAttributeId") ?? "";
+        var scope=await QueryAssets("objectType in objectTypeAndChildren(\"Sprzęt użytkownika\")");
+        var attributeName="Osoba_odpowiedzialna";
+        var scopeOwnerAttributes=scope.SelectMany(o=>o["attributes"] as JsonArray ?? new JsonArray())
+            .Count(a=>string.Equals(a?["objectTypeAttribute"]?["name"]?.ToString(),
+                attributeName,StringComparison.OrdinalIgnoreCase));
+        var scopeConfiguredAttributes=scope.SelectMany(o=>o["attributes"] as JsonArray ?? new JsonArray())
+            .Count(a=>a?["objectTypeAttributeId"]?.ToString()==ownerId);
+        var matches=scope.Count(o=>JiraAssetOwnership.Matches(o,ownerId,aliases));
+        var examples=new[]{"K24-085","M25-021","M25-022","SD/2022/035"};
+        var knownAssets=examples.Select(key=>new {
+            key,
+            found=scope.Any(o=>string.Equals(o["objectKey"]?.ToString(),key,StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(o["label"]?.ToString(),key,StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(o["name"]?.ToString(),key,StringComparison.OrdinalIgnoreCase)),
+            ownerAttributeFound=scope.Where(o=>string.Equals(o["objectKey"]?.ToString(),key,StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(o["label"]?.ToString(),key,StringComparison.OrdinalIgnoreCase))
+                .Any(o=>(o["attributes"] as JsonArray ?? new JsonArray()).Any(a=>
+                    a?["objectTypeAttributeId"]?.ToString()==ownerId ||
+                    string.Equals(a?["objectTypeAttribute"]?["name"]?.ToString(),
+                        attributeName,StringComparison.OrdinalIgnoreCase))),
+            assignedToCurrentUser=scope.Any(o=>
+                (string.Equals(o["objectKey"]?.ToString(),key,StringComparison.OrdinalIgnoreCase)
+                || string.Equals(o["label"]?.ToString(),key,StringComparison.OrdinalIgnoreCase))
+                && JiraAssetOwnership.Matches(o,ownerId,aliases))
+        }).ToArray();
+        return Results.Ok(new {
+            identityStatus, jiraAliasCount, adDisplayNameAvailable=!string.IsNullOrWhiteSpace(ad?.Name),
+            configuredOwnerAttribute=long.TryParse(ownerId,out _),
+            scopeObjects=scope.Count, scopeOwnerAttributes,scopeConfiguredAttributes,matches,
+            knownAssets
+        });
+    } catch(Exception ex) {
+        app.Logger.LogError(ex,"Jira ownership diagnostics failed");
+        return Results.Problem("Jira ownership diagnostics failed. See server logs.",statusCode:502);
+    }
+});
+
 app.MapGet("/api/assets/diagnostics", async (HttpContext ctx) => {
     if (ctx.User.Identity?.IsAuthenticated != true) return Results.Unauthorized();
     if (!access.Check(ctx.User).Allowed) return Results.Forbid();
