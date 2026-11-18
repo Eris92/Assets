@@ -564,6 +564,9 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
     }
     var aliases=JiraAssetOwnership.Aliases(identity,emails.Select(x=>x.Email)).ToHashSet(StringComparer.OrdinalIgnoreCase);
     var verifiedJiraIdentity=false;
+    // Start the independent inventory scan concurrently with Jira identity
+    // resolution. All ownership checks still happen after both complete.
+    var scopeTask=QueryAssets(InventoryScopeAql(),refresh);
     // Jira Assets Users references are distinct from Jira account IDs.
     // Resolve the AD email to the same stable identity before matching assets.
     try {
@@ -580,12 +583,12 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
     var configuredAql=Setting("Aql","Jira:Aql");
     // Use MC-SIRK's confirmed equipment subtree when no custom scope is defined.
     // Keep the scoped exact-owner filter; never return unfiltered Jira inventory.
-    var equipmentAql="objectType in objectTypeAndChildren(\"Sprzęt użytkownika\")";
+
     try {
         // Legacy behavior restored: query configured AQL (ALL pages) and filter
         // the specified owner attribute on the server, never in the browser.
         // This retains SAMAccountName / DOMAIN\sam mappings stored by Jira.
-        var scope=await QueryAssets(equipmentAql,refresh);
+        var scope=await scopeTask;
         if(verifiedJiraIdentity && !string.IsNullOrWhiteSpace(adDisplayName)) {
             foreach(var alias in JiraAssetOwnership.UniqueReferencedOwnerAliases(
                 scope,ownerAttributeId,adDisplayName))aliases.Add(alias);
