@@ -31,7 +31,8 @@ async function loadAnnualReviews(){
   const active=myReviewRows.filter(x=>x.year===new Date().getUTCFullYear()&&x.status!=='Confirmed');
   const pending=$('reviewPendingIndicator');
   if(pending)pending.textContent=active.length?' ('+active.length+')':'';
- } catch(error){if($('annualReviewRows'))$('annualReviewRows').textContent=error.message}
+  navPending.reviews=active.length;updateReviewGroupBadge();
+ } catch(error){navPending.reviews=null;updateReviewGroupBadge();if($('annualReviewRows'))$('annualReviewRows').textContent=error.message}
 }
 let reviewCurrent=null;
 async function openReviewSnapshot(kind,discrepancy){
