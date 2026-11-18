@@ -31,6 +31,9 @@ $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccou
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -StartWhenAvailable
 Register-ScheduledTask -TaskName 'AssetsWeb-Production-Updates' -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Fixed-actions Assets GitHub Release update or rollback' -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $queue 'enabled.flag'), 'v1', (New-Object Text.UTF8Encoding($false)))
+# Force the first heartbeat immediately, without waiting for the next minute.
+Start-ScheduledTask -TaskName 'AssetsWeb-Production-Updates' -ErrorAction Stop
+
 Write-Host 'Installed task: \AssetsWeb-Production-Updates (SYSTEM, once per minute).'
 Write-Host "Queue: $queue"
 Write-Host "Protected worker scripts: $protected"
