@@ -600,24 +600,11 @@ async Task<(List<JsonNode> Objects, (string Email,string Source,int Count)[] Mat
         app.Logger.LogWarning(ex,"Jira equipment AQL unavailable; attempting exact email-reference query");
         matches.Add((identity,"Equipment AQL (unavailable)",0));
     }
-    // Also support the newer Jira Assets owner-reference query when available.
-    // If the configured legacy scope already works, failure of the optional
-    // email query must not hide the working result.
-    foreach(var candidate in emails) {
-        try {
-            var owned=await QueryAssets(OwnerAqlForEmail(candidate.Email),refresh);
-            foreach(var obj in owned) {
-                var id=obj["id"]?.ToString();
-                if(!string.IsNullOrWhiteSpace(id))rows.TryAdd(id,obj);
-            }
-            matches.Add((candidate.Email,candidate.Source,owned.Count));
-        } catch(Exception ex) {
-            app.Logger.LogWarning(ex,"Optional Jira owner-reference query failed for {Source}",candidate.Source);
-            matches.Add((candidate.Email,candidate.Source+" (unavailable)",0));
-        }
-    }
+    // The owner's authenticated Jira Assets Users reference is evaluated in the
+    // complete equipment scope above. Avoid redundant email-reference AQL scans,
+    // which add high latency and do not match this Jira schema.
     if(matches.All(x=>x.Source.Contains("unavailable",StringComparison.OrdinalIgnoreCase)))
-        throw new InvalidOperationException("Both Jira ownership query methods failed");
+        throw new InvalidOperationException("Jira equipment inventory query failed");
     return (rows.Values.ToList(),matches.ToArray());
 }
 
