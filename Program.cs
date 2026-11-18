@@ -1530,13 +1530,11 @@ app.MapGet("/api/team", async (HttpContext ctx) => {
         if (!long.TryParse(ownerId,out _)) return Results.Ok(new { people = people.Select(p=>new { id=p.Login, name=p.Name, role=p.Role, manager=LoginKey(p.Manager)==LoginKey(actor) ? "me" : p.Manager, delegated=false }), equipment=Array.Empty<object>(), inventoryComplete=false, inventoryError="Nie skonfigurowano pola wlasciciela Jira." });
         var delegatedRoots = delegations.ByDelegate(actor).Select(x=>x.ManagerLogin).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var directTeam = ReportsTo(actor).Select(p=>p.Login).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var configured = Setting("Aql","Jira:Aql");
-        // One configured-scope scan for the whole team; never one global scan per employee.
+        // Reuse the same complete equipment snapshot as My Assets.
+        // Never issue one Jira AQL scan for every AD employee.
         List<JsonNode> scoped;
         try {
-            scoped = string.IsNullOrWhiteSpace(configured)
-                ? new List<JsonNode>()
-                : await QueryAssets(configured);
+            scoped = await QueryAssets(InventoryScopeAql(),ctx.Request.Query.ContainsKey("refresh"));
         } catch(Exception ex) {
             app.Logger.LogWarning(ex, "Team Jira scoped inventory query failed");
             return Results.Ok(new {
@@ -1570,14 +1568,12 @@ app.MapGet("/api/team", async (HttpContext ctx) => {
                     var id=obj["id"]?.ToString();
                     if(!string.IsNullOrWhiteSpace(id))objects.TryAdd(id,obj);
                 }
-                if(ad is not null) {
-                    try {
-                        foreach(var obj in await QueryAssets(SafeOwnerAql(ad))) {
-                            var id=obj["id"]?.ToString();
-                            if(!string.IsNullOrWhiteSpace(id))objects.TryAdd(id,obj);
-                        }
-                    } catch(Exception ex) when(!string.IsNullOrWhiteSpace(configured)) {
-                        app.Logger.LogWarning(ex,"Optional Jira email AQL failed for scoped team member");
+                if(ad is not null && !string.IsNullOrWhiteSpace(ad.Name)) {
+                    foreach(var reference in JiraAssetOwnership.UniqueReferencedOwnerAliases(
+                        scoped,ownerId!,ad.Name)) aliases.Add(reference);
+                    foreach(var obj in scoped.Where(o=>JiraAssetOwnership.Matches(o,ownerId!,aliases))) {
+                        var id=obj["id"]?.ToString();
+                        if(!string.IsNullOrWhiteSpace(id))objects.TryAdd(id,obj);
                     }
                 }
                 foreach (var obj in objects.Values.Where(IsEquipment)) {
